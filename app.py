@@ -1,5 +1,4 @@
-import os, re, random, threading, math
-from collections import Counter
+import os, re, random, threading
 from flask import Flask, request, jsonify, send_from_directory
 from deep_translator import GoogleTranslator
 from langdetect import detect
@@ -22,12 +21,11 @@ def stem_bangla(word):
             return word[:-len(suffix)]
     return word
 
-class SmartRetriever:
+class KeywordRetriever:
     def __init__(self):
         self.lock = threading.Lock()
         self.docs = []
-        self.doc_vectors = []
-        self.idf = {}
+        self.doc_tokens = []
 
     def tokenize(self, text):
         words = re.findall(r'[\u0980-\u09FF\w]+', text.lower())
@@ -35,68 +33,41 @@ class SmartRetriever:
         for w in words:
             if w not in STOPWORDS:
                 clean_words.append(stem_bangla(w))
-        return clean_words
+        return set(clean_words)
 
     def fit(self, lines):
         with self.lock:
             self.docs = list(dict.fromkeys([l for l in lines if l and l.strip()]))
-            n = len(self.docs)
-            if n == 0:
-                self.doc_vectors = []
-                self.idf = {}
-                return
-            
-            tokenized = [self.tokenize(d) for d in self.docs]
-            df = Counter()
-            for toks in tokenized:
-                for w in set(toks):
-                    df[w] += 1
-            
-            self.idf = {w: math.log((n + 1) / (c + 1)) + 1 for w, c in df.items()}
-            self.doc_vectors = [self._vectorize(toks) for toks in tokenized]
+            self.doc_tokens = [self.tokenize(doc) for doc in self.docs]
+            print(f"✅ Retriever trained on {len(self.docs)} lines")
 
-    def _vectorize(self, tokens):
-        if not tokens:
-            return {}
-        counts = Counter(tokens)
-        vec = {}
-        for w, c in counts.items():
-            if w in self.idf:
-                vec[w] = c * self.idf[w]
-        norm = math.sqrt(sum(v * v for v in vec.values()))
-        if norm > 0:
-            vec = {w: v / norm for w, v in vec.items()}
-        return vec
-
-    def predict(self, text, threshold=0.20):
+    def predict(self, text):
         with self.lock:
-            if not self.doc_vectors:
-                return None
-            toks = self.tokenize(text)
-            if not toks:
-                return None
-            qvec = self._vectorize(toks)
-            if not qvec:
-                return None
+            q_tokens = self.tokenize(text)
+            if not q_tokens: return None
             
-            best_score = 0.0
-            best_idx = -1
-            for i, dvec in enumerate(self.doc_vectors):
-                score = sum(v * dvec.get(w, 0.0) for w, v in qvec.items())
-                if score > best_score:
-                    best_score = score
-                    best_idx = i
+            best_doc = None
+            best_score = 0
             
-            if best_score >= threshold and best_idx >= 0:
-                return self.docs[best_idx]
+            for i, d_tokens in enumerate(self.doc_tokens):
+                intersection = len(q_tokens.intersection(d_tokens))
+                union = len(q_tokens.union(d_tokens))
+                if union > 0:
+                    score = intersection / union
+                    if score > best_score:
+                        best_score = score
+                        best_doc = self.docs[i]
+            
+            # ৪০% শব্দ মিললেই উত্তর দেবে
+            if best_score >= 0.40:
+                return best_doc
             return None
 
-retriever = SmartRetriever()
+retriever = KeywordRetriever()
 file_lock = threading.Lock()
 
 def _load_knowledge():
-    if not os.path.exists(KNOWLEDGE_FILE):
-        return []
+    if not os.path.exists(KNOWLEDGE_FILE): return []
     with open(KNOWLEDGE_FILE, "r", encoding="utf-8") as f:
         content = f.read()
     raw = re.split(r'[\n।?!\.]\s*', content)
@@ -106,63 +77,54 @@ def _load_knowledge():
 def _train():
     try:
         lines = _load_knowledge()
-        if lines:
-            retriever.fit(lines)
-            print(f"✅ Smart Retriever trained on {len(lines)} lines")
+        if lines: retriever.fit(lines)
     except Exception as e:
         print("Train error:", e)
 
 def get_ai_response(user_input, history):
-    # ভাষা ডিটেক্ট করা
-    try:
-        detected_lang = detect(user_input)
-    except:
-        detected_lang = 'bn'
-        
-    is_bengali = bool(re.search(r'[\u0980-\u09FF]', user_input))
+    norm = user_input.lower().strip()
+    is_bengali = bool(re.search(r'[\u0980-\u09FF]', norm))
+
+    # ১. হার্ডকোড করা মাল্টি-লিঙ্গুয়াল উত্তর (১০০% সঠিকতার জন্য)
+    if ("national flower" in norm and "bangladesh" in norm) or "জাতীয় ফুল" in norm:
+        return "বাংলাদেশের জাতীয় ফুল শাপলা। (The national flower of Bangladesh is Water Lily.)"
     
-    # যদি বাংলা না হয়, তবে প্রশ্নটি বাংলায় অনুবাদ করে নেওয়া
+    if ("national bird" in norm and "bangladesh" in norm) or "জাতীয় পাখি" in norm:
+        return "বাংলাদেশের জাতীয় পাখি দোয়েল। (The national bird of Bangladesh is Magpie Robin.)"
+        
+    if ("national fruit" in norm and "bangladesh" in norm) or "জাতীয় ফল" in norm:
+        return "বাংলাদেশের জাতীয় ফল কাঁঠাল। (The national fruit of Bangladesh is Jackfruit.)"
+        
+    if ("national animal" in norm and "bangladesh" in norm) or "জাতীয় পশু" in norm:
+        return "বাংলাদেশের জাতীয় পশু রয়েল বেঙ্গল টাইগার। (The national animal of Bangladesh is Royal Bengal Tiger.)"
+        
+    if ("capital" in norm and "bangladesh" in norm) or ("রাজধানী" in norm and "বাংলাদেশ" in norm):
+        return "বাংলাদেশের রাজধানী ঢাকা। (The capital of Bangladesh is Dhaka.)"
+
+    if "who created you" in norm or "who made you" in norm or "কে তৈরি" in norm or "তুমি কে" in norm:
+        return "আমাকে তৈরি করেছেন মেহেদী হাসান অনিক। (I was created by Mehedi Hasan Anik.)"
+
+    # ২. ট্রান্সলেশন (যদি বাংলা না হয়)
     query_for_search = user_input
     if not is_bengali:
         try:
             query_for_search = GoogleTranslator(source='auto', target='bn').translate(user_input)
-        except Exception as e:
-            print("Translation error:", e)
-            query_for_search = user_input
+        except Exception:
+            pass # ট্রান্সলেশন ফেইল করলে ইংরেজিতেই খুঁজবে
 
-    norm = query_for_search.lower().strip()
+    norm_search = query_for_search.lower().strip()
 
-    # Direct Hardcoded Responses (Bengali)
-    if any(k in norm for k in ["অনিক নুডলস", "অনিকের প্রিয় খাবার", "অনিক কি পছন্দ করে"]):
-        ans = "অনিক নুডলস খুব বেশি পছন্দ করে!"
-    elif any(k in norm for k in ["ভালোবাসে", "ভালোবাসা"]):
-        ans = "অনিক জনিকে অনেক ভালোবাসে এবং জনিও অনিকে অনেক ভালোবাসে।"
-    elif any(k in norm for k in ["অলক", "ছোট ভাই"]):
-        ans = "অলক হলো অনিকের ছোট ভাই। সে অত্যন্ত বুদ্ধিমান এবং পড়াশোনায় অতুলনীয়। সে গাজীপুরে থাকে এবং চাকরি ও পড়াশোনা একসাথে করছে।"
-    elif any(k in norm for k in ["জনি কে", "জনি কি"]):
-        ans = "জনি হলো অনিকের স্ত্রী। তাদের বিয়ে হয়েছে ২৮ নভেম্বর ২০২৫ সালে। জনির বাড়ি পাইকশা।"
-    elif any(k in norm for k in ["অনিক কে", "অনিক কি", "কে অনিক"]):
-        ans = "অনিকের সম্পূর্ণ নাম মেহেদী হাসান অনিক। তিনিই আমাকে তৈরি করেছেন। তিনি একজন অসাধারণ, প্রতিভাবান এবং উদ্ভাবনী ডেভেলপার।"
-    elif any(k in norm for k in ["কে তৈরি", "কি দিয়ে তৈরি", "তুমি কে"]):
-        ans = "আমাকে তৈরি করেছেন মেহেদী হাসান অনিক। তিনি একজন অসাধারণ, প্রতিভাবান এবং উদ্ভাবনী ডেভেলপার।"
-    else:
-        # Retriever Fallback
-        ans = retriever.predict(norm)
-        if ans:
-            if not ans.endswith(("।", ".", "!", "?")):
-                ans += "।"
-        else:
-            ans = "আমি এই বিষয়ে নিশ্চিত নই। আপনি কি 'Teach' বাটন (🎓) দিয়ে আমাকে এটি শিখিয়ে দেবেন?"
+    # ৩. ডাটাবেস থেকে খোঁজা
+    ans = retriever.predict(norm_search)
+    if ans:
+        if not ans.endswith(("।", ".", "!", "?")):
+            ans += "।"
+        return ans
 
-    # যদি ইউজারের ভাষা বাংলা না হয়, তবে উত্তরটি তার ভাষায় অনুবাদ করে দেওয়া
-    if detected_lang != 'bn' and not is_bengali:
-        try:
-            ans = GoogleTranslator(source='bn', target=detected_lang).translate(ans)
-        except Exception as e:
-            print("Reply translation error:", e)
-            pass # ত্রুটি হলে বাংলাতেই থাকবে
-
-    return ans
+    # ৪. ফলব্যাক
+    if is_bengali:
+        return "আমি এই বিষয়ে নিশ্চিত নই। আপনি কি 'Teach' বাটন (🎓) দিয়ে আমাকে এটি শিখিয়ে দেবেন?"
+    return "I'm not sure about that. Please teach me using the 'Teach' button."
 
 @app.route('/')
 def index(): return send_from_directory(BASE_DIR, 'index.html')
@@ -174,7 +136,7 @@ def ask():
         reply = get_ai_response(data.get('message', ''), data.get('history', []))
         return jsonify({'reply': reply})
     except Exception as e:
-        return jsonify({'reply': 'দুঃখিত, একটি সমস্যা হয়েছে। / Sorry, an error occurred.'}), 500
+        return jsonify({'reply': 'দুঃখিত, একটি সমস্যা হয়েছে।'}), 500
 
 @app.route('/teach', methods=['POST'])
 def teach():
@@ -192,7 +154,7 @@ def teach():
                 if needs_nl: f.write("\n")
                 f.write(fact + "\n")
         threading.Thread(target=_train, daemon=True).start()
-        return jsonify({'reply': 'দারুণ! নতুন এই তথ্যটি শিখে নিলাম। / Great! I have learned this.'})
+        return jsonify({'reply': 'দারুণ! নতুন এই তথ্যটি শিখে নিলাম।'})
     except Exception as e:
         return jsonify({'reply': 'তথ্য সংরক্ষণে সমস্যা হয়েছে।'}), 500
 
