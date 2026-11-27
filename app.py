@@ -1,9 +1,8 @@
 import os, re, random, threading
 from flask import Flask, request, jsonify, send_from_directory
-from deep_translator import GoogleTranslator
+from deep_translator import GoogleTranslator, MyMemoryTranslator
 from langdetect import detect, DetectorFactory
 
-# ভাষা শনাক্তকরণে ধারাবাহিকতার জন্য সিড সেট করা
 DetectorFactory.seed = 0
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -84,60 +83,91 @@ def _train():
     except Exception as e:
         print("Train error:", e)
 
+# নতুন ফাংশন: ট্রান্সলেশন ফেইল হলে বিকল্প উপায়
+def safe_translate(text, target_lang):
+    if not text.strip(): return text
+    
+    # ১. প্রথমে গুগল ট্রান্সলেটর চেষ্টা
+    try:
+        return GoogleTranslator(source='auto', target=target_lang).translate(text)
+    except Exception as e:
+        print("Google Translator failed, trying MyMemory:", e)
+        
+    # ২. গুগল ফেইল করলে MyMemory ব্যবহার
+    try:
+        mm_target = target_lang
+        if target_lang.startswith('zh'): mm_target = 'zh-CN'
+        elif target_lang == 'en': mm_target = 'en-GB'
+        elif target_lang == 'bn': mm_target = 'bn-IN'
+        
+        return MyMemoryTranslator(source='auto', target=mm_target).translate(text)
+    except Exception as e:
+        print("MyMemory Translator also failed:", e)
+        
+    return text # সব ফেইল করলে অরিজিনাল টেক্সট ফেরত দেবে
+
 def get_ai_response(user_input, history):
-    # ১. ভাষা ডিটেক্ট করা
+    norm_input = user_input.lower().strip()
+    
+    # ভাষা ডিটেক্ট
     try:
         detected_lang = detect(user_input)
     except:
         detected_lang = 'bn'
 
-    # ২. যদি বাংলা না হয়, তবে বাংলায় অনুবাদ করা
-    query_in_bn = user_input
-    if detected_lang != 'bn':
-        try:
-            query_in_bn = GoogleTranslator(source='auto', target='bn').translate(user_input)
-        except Exception as e:
-            print("Translation to BN failed:", e)
-            query_in_bn = user_input # ফেইল করলে অরিজিনাল টেক্সট দিয়েই খুঁজবে
+    target_lang_code = detected_lang
+    if target_lang_code.startswith('zh'):
+        target_lang_code = 'zh-CN'
 
-    norm = query_in_bn.lower().strip()
-
-    # ৩. উত্তর তৈরি করা (বাংলায়)
     ans_bn = None
 
-    # হার্ডকোড করা বেসিক প্রশ্ন
-    if "জাতীয় ফুল" in norm or "national flower" in norm:
-        ans_bn = "বাংলাদেশের জাতীয় ফুল শাপলা।"
-    elif "জাতীয় পাখি" in norm or "national bird" in norm:
-        ans_bn = "বাংলাদেশের জাতীয় পাখি দোয়েল।"
-    elif "জাতীয় ফল" in norm or "national fruit" in norm:
-        ans_bn = "বাংলাদেশের জাতীয় ফল কাঁঠাল।"
-    elif "জাতীয় পশু" in norm or "national animal" in norm:
-        ans_bn = "বাংলাদেশের জাতীয় পশু রয়েল বেঙ্গল টাইগার।"
-    elif "রাজধানী" in norm or "capital" in norm:
+    # ১. সরাসরি মাল্টি-লিঙ্গুয়াল শব্দ চেক (ট্রান্সলেশন ফেইল করলেও কাজ করবে)
+    if "首都" in norm_input and "孟加拉" in norm_input:
         ans_bn = "বাংলাদেশের রাজধানী ঢাকা।"
-    elif "কে তৈরি" in norm or "who created" in norm or "who made" in norm:
+    elif "国花" in norm_input and "孟加拉" in norm_input:
+        ans_bn = "বাংলাদেশের জাতীয় ফুল শাপলা।"
+    elif "国鸟" in norm_input and "孟加拉" in norm_input:
+        ans_bn = "বাংলাদেশের জাতীয় পাখি দোয়েল।"
+        
+    elif "national flower" in norm_input or "জাতীয় ফুল" in norm_input:
+        ans_bn = "বাংলাদেশের জাতীয় ফুল শাপলা।"
+    elif "national bird" in norm_input or "জাতীয় পাখি" in norm_input:
+        ans_bn = "বাংলাদেশের জাতীয় পাখি দোয়েল।"
+    elif "national fruit" in norm_input or "জাতীয় ফল" in norm_input:
+        ans_bn = "বাংলাদেশের জাতীয় ফল কাঁঠাল।"
+    elif "national animal" in norm_input or "জাতীয় পশু" in norm_input:
+        ans_bn = "বাংলাদেশের জাতীয় পশু রয়েল বেঙ্গল টাইগার।"
+    elif "capital" in norm_input or "রাজধানী" in norm_input:
+        ans_bn = "বাংলাদেশের রাজধানী ঢাকা।"
+    elif "who created" in norm_input or "who made" in norm_input or "কে তৈরি" in norm_input:
         ans_bn = "আমাকে তৈরি করেছেন মেহেদী হাসান অনিক।"
 
-    # যদি হার্ডকোডে না পাওয়া যায়, তবে ডাটাবেস থেকে খোঁজা
+    # ২. সরাসরি না পেলে, অনুবাদ করে খোঁজা
     if not ans_bn:
-        ans_bn = retriever.predict(norm)
+        query_in_bn = user_input
+        if detected_lang != 'bn':
+            query_in_bn = safe_translate(user_input, 'bn')
+            
+        norm = query_in_bn.lower().strip()
+        
+        # অনুবাদ করা বাংলা টেক্সট চেক
+        if "জাতীয় ফুল" in norm: ans_bn = "বাংলাদেশের জাতীয় ফুল শাপলা।"
+        elif "জাতীয় পাখি" in norm: ans_bn = "বাংলাদেশের জাতীয় পাখি দোয়েল।"
+        elif "জাতীয় ফল" in norm: ans_bn = "বাংলাদেশের জাতীয় ফল কাঁঠাল।"
+        elif "জাতীয় পশু" in norm: ans_bn = "বাংলাদেশের জাতীয় পশু রয়েল বেঙ্গল টাইগার।"
+        elif "রাজধানী" in norm: ans_bn = "বাংলাদেশের রাজধানী ঢাকা।"
+        elif "কে তৈরি" in norm: ans_bn = "আমাকে তৈরি করেছেন মেহেদী হাসান অনিক।"
+        else: 
+            ans_bn = retriever.predict(norm)
 
-    # যদি কোনো উত্তর না পাওয়া যায়
+    # ৩. ডিফল্ট ফলব্যাক
     if not ans_bn:
         ans_bn = "আমি এই বিষয়ে নিশ্চিত নই। আপনি কি 'Teach' বাটন (🎓) দিয়ে আমাকে এটি শিখিয়ে দেবেন?"
 
-    # ৪. যদি ইউজারের ভাষা বাংলা না হয়, তবে উত্তরটি তার ভাষায় অনুবাদ করা
+    # ৪. উত্তরটি ইউজারের ভাষায় অনুবাদ করে দেওয়া
     if detected_lang != 'bn':
-        try:
-            # ভাষার কোড ম্যাপিং (কিছু ক্ষেত্রে langdetect 'zh-cn' দেয়, গুগল 'zh-CN' চায়)
-            target_lang = detected_lang.split('-')[0] 
-            final_ans = GoogleTranslator(source='bn', target=target_lang).translate(ans_bn)
-            return final_ans
-        except Exception as e:
-            print("Translation reply failed:", e)
-            # অনুবাদ ফেইল করলে বাংলা + ইংরেজি মিক্স করে দেবে
-            return f"{ans_bn}"
+        final_ans = safe_translate(ans_bn, target_lang_code)
+        return final_ans
 
     return ans_bn
 
