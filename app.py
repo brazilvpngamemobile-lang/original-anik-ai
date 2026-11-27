@@ -1,5 +1,4 @@
 import os, re, random, threading, requests
-from bs4 import BeautifulSoup
 from flask import Flask, request, jsonify, send_from_directory
 from deep_translator import GoogleTranslator
 from langdetect import detect, DetectorFactory
@@ -53,7 +52,9 @@ class KeywordRetriever:
                     if score > best_score:
                         best_score = score
                         best_doc = self.docs[i]
-            if best_score >= 0.40:
+            
+            # স্কোর ০.৪০ থেকে কমিয়ে ০.২৫ করা হলো, যাতে ছোট প্রশ্নও ম্যাচ করে
+            if best_score >= 0.25:
                 return best_doc
             return None
 
@@ -75,27 +76,31 @@ def _train():
     except Exception as e:
         print("Train error:", e)
 
-# --- নতুন হালকা ওয়েব সার্চ ইঞ্জিন ---
+# --- নতুন উন্নত ওয়েব সার্চ ইঞ্জিন (Wikipedia API) ---
 def get_web_answer(query):
     try:
         eng_query = query
         if not bool(re.search(r'[a-zA-Z]', query)):
             eng_query = GoogleTranslator(source='auto', target='en').translate(query)
 
-        # ১. DuckDuckGo Instant Answer API (সবচেয়ে ফাস্ট)
-        url = f"https://api.duckduckgo.com/?q={eng_query}&format=json&no_html=1"
-        res = requests.get(url, timeout=5).json()
-        if res.get('AbstractText'):
-            return res['AbstractText']
-        elif res.get('Answer'):
-            return res['Answer']
-
-        # ২. Wikipedia API
-        wiki_url = f"https://en.wikipedia.org/api/rest_v1/page/summary/{eng_query.replace(' ', '_')}"
-        wiki_res = requests.get(wiki_url, timeout=5)
-        if wiki_res.status_code == 200:
-            return wiki_res.json().get('extract', None)
-            
+        headers = {'User-Agent': 'AnikAI/1.0 (https://github.com/brazilvpngamemobile-lang/original-anik-ai)'}
+        
+        # ১. Wikipedia-তে সার্চ করা
+        search_url = f"https://en.wikipedia.org/w/api.php?action=query&list=search&srsearch={eng_query}&format=json"
+        res = requests.get(search_url, headers=headers, timeout=5)
+        
+        if res.status_code == 200:
+            search_data = res.json()
+            if search_data['query']['search']:
+                top_title = search_data['query']['search'][0]['title']
+                
+                # ২. টাইটেল পেলে তার সামারি বের করা
+                summary_url = f"https://en.wikipedia.org/api/rest_v1/page/summary/{top_title}"
+                summary_res = requests.get(summary_url, headers=headers, timeout=5)
+                if summary_res.status_code == 200:
+                    extract = summary_res.json().get('extract')
+                    if extract:
+                        return extract
     except Exception as e:
         print("Web search error:", e)
     return None
@@ -113,12 +118,10 @@ def get_ai_response(user_input, history):
     ans_bn = None
     is_web_search = False
 
-    # ১. লোকাল মাল্টি-লিঙ্গুয়াল ডিকশনারি
+    # ১. লোকাল হার্ডকোড (বেসিক প্রশ্নের জন্য)
     if "首都" in norm_input or "首都是" in norm_input:
         ans_bn = "বাংলাদেশের রাজধানী ঢাকা।"
-    elif "国花" in norm_input:
-        ans_bn = "বাংলাদেশের জাতীয় ফুল শাপলা।"
-    elif "national flower" in norm_input or "জাতীয় ফুল" in norm_input:
+    elif "国花" in norm_input or "national flower" in norm_input or "জাতীয় ফুল" in norm_input:
         ans_bn = "বাংলাদেশের জাতীয় ফুল শাপলা।"
     elif "national bird" in norm_input or "জাতীয় পাখি" in norm_input:
         ans_bn = "বাংলাদেশের জাতীয় পাখি দোয়েল।"
@@ -126,6 +129,14 @@ def get_ai_response(user_input, history):
         ans_bn = "বাংলাদেশের রাজধানী ঢাকা।"
     elif "who created" in norm_input or "who made" in norm_input or "কে তৈরি" in norm_input:
         ans_bn = "আমাকে তৈরি করেছেন মেহেদী হাসান অনিক।"
+    
+    # অলক ও অন্যান্য নির্দিষ্ট প্রশ্ন
+    elif "অলক" in norm_input:
+        ans_bn = "অলক হচ্ছে অনিকের ছোট ভাই। সে অত্যন্ত বুদ্ধিমান এবং পড়াশোনায় অতুলনীয়। সে গাজীপুরে থাকে এবং চাকরি ও পড়াশোনা একসাথে করছে।"
+    elif "বড় দেশ" in norm_input or "largest country" in norm_input:
+        ans_bn = "বিশ্বের সবচেয়ে বড় দেশ রাশিয়া।"
+    elif "ছোট দেশ" in norm_input or "smallest country" in norm_input:
+        ans_bn = "বিশ্বের সবচেয়ে ছোট দেশ ভ্যাটিকান সিটি।"
 
     # ২. ডাটাবেসে খোঁজা
     if not ans_bn:
