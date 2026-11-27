@@ -1,6 +1,6 @@
-flask
-gunicorn
-requests
-beautifulsoup4
-deep-translator
-langdetect
+Flask==3.0.3
+gunicorn==22.0.0
+requests==2.32.3
+beautifulsoup4==4.12.3
+deep-translator==1.11.4
+langdetect==1.0.9
