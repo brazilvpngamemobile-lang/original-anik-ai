@@ -86,35 +86,38 @@ def safe_translate(text, target_lang):
         except Exception:
             return text
 
-def get_web_answer(query, detected_lang):
+# --- নতুন ওয়েব সার্চ (DuckDuckGo Instant Answer API) ---
+def get_web_answer(query):
     try:
-        headers = {'User-Agent': 'AnikAI/1.0'}
+        # ইংরেজিতে অনুবাদ করা (ওয়েব সার্চে ভালো রেজাল্টের জন্য)
+        eng_query = safe_translate(query, 'en')
+        headers = {'User-Agent': 'Mozilla/5.0'}
         
-        # যদি প্রশ্ন বাংলায় হয়, তবে সরাসরি বাংলা উইকিপিডিয়ায় সার্চ করবে (অনুবাদ লাগবে না)
-        if detected_lang == 'bn':
-            search_url = f"https://bn.wikipedia.org/w/api.php?action=query&list=search&srsearch={requests.utils.quote(query)}&format=json"
-            res = requests.get(search_url, headers=headers, timeout=8)
-            if res.status_code == 200:
-                search_data = res.json()
-                if search_data['query']['search']:
-                    top_title = search_data['query']['search'][0]['title']
-                    summary_url = f"https://bn.wikipedia.org/api/rest_v1/page/summary/{requests.utils.quote(top_title)}"
-                    summary_res = requests.get(summary_url, headers=headers, timeout=5)
-                    if summary_res.status_code == 200:
-                        return summary_res.json().get('extract')
-        else:
-            # অন্য ভাষা হলে ইংরেজিতে অনুবাদ করে ইংরেজি উইকিপিডিয়ায় সার্চ করবে
-            eng_query = safe_translate(query, 'en')
-            search_url = f"https://en.wikipedia.org/w/api.php?action=query&list=search&srsearch={requests.utils.quote(eng_query)}&format=json"
-            res = requests.get(search_url, headers=headers, timeout=8)
-            if res.status_code == 200:
-                search_data = res.json()
-                if search_data['query']['search']:
-                    top_title = search_data['query']['search'][0]['title']
-                    summary_url = f"https://en.wikipedia.org/api/rest_v1/page/summary/{requests.utils.quote(top_title)}"
-                    summary_res = requests.get(summary_url, headers=headers, timeout=5)
-                    if summary_res.status_code == 200:
-                        return summary_res.json().get('extract')
+        # DuckDuckGo Instant Answer API
+        url = f"https://api.duckduckgo.com/?q={requests.utils.quote(eng_query)}&format=json&no_html=1"
+        res = requests.get(url, headers=headers, timeout=8)
+        
+        if res.status_code == 200:
+            data = res.json()
+            # যদি সরাসরি উত্তর পাওয়া যায়
+            if data.get('AbstractText'):
+                return data['AbstractText']
+            if data.get('Answer'):
+                return data['Answer']
+            if data.get('Definition'):
+                return data['Definition']
+                
+        # ডাকডাকগো ফেইল করলে উইকিপিডিয়া ফলব্যাক
+        wiki_url = f"https://en.wikipedia.org/w/api.php?action=query&list=search&srsearch={requests.utils.quote(eng_query)}&format=json"
+        wiki_res = requests.get(wiki_url, headers=headers, timeout=5)
+        if wiki_res.status_code == 200:
+            search_data = wiki_res.json()
+            if search_data['query']['search']:
+                top_title = search_data['query']['search'][0]['title']
+                summary_url = f"https://en.wikipedia.org/api/rest_v1/page/summary/{requests.utils.quote(top_title)}"
+                summary_res = requests.get(summary_url, headers=headers, timeout=5)
+                if summary_res.status_code == 200:
+                    return summary_res.json().get('extract')
 
     except Exception as e:
         print("Web search error:", e)
@@ -132,26 +135,30 @@ def get_ai_response(user_input, history):
     ans_bn = None
     is_web_search = False
 
-    # ১. লোকাল হার্ডকোড (নিশ্চিত উত্তর)
-    if "capital" in norm_input or "রাজধানী" in norm_input:
-        if "bangladesh" in norm_input or "বাংলাদেশ" in norm_input:
-            ans_bn = "বাংলাদেশের রাজধানী ঢাকা।"
-        elif "iran" in norm_input or "ইরান" in norm_input:
-            ans_bn = "ইরানের রাজধানী তেহরান।"
-    elif "national flower" in norm_input or "জাতীয় ফুল" in norm_input:
-        ans_bn = "বাংলাদেশের জাতীয় ফুল শাপলা।"
-    elif "national bird" in norm_input or "জাতীয় পাখি" in norm_input:
-        ans_bn = "বাংলাদেশের জাতীয় পাখি দোয়েল।"
-    elif "who created" in norm_input or "who made" in norm_input or "কে তৈরি" in norm_input:
-        ans_bn = "আমাকে তৈরি করেছেন মেহেদী হাসান অনিক।"
-    elif "অলক" in norm_input:
-        ans_bn = "অলক হচ্ছে অনিকের ছোট ভাই। সে অত্যন্ত বুদ্ধিমান এবং পড়াশোনায় অতুলনীয়। সে গাজীপুরে থাকে এবং চাকরি ও পড়াশোনা একসাথে করছে।"
+    # ১. লোকাল হার্ডকোড (নিশ্চিত ও নির্ভুল উত্তর)
+    if "রাজধানী" in norm_input or "capital" in norm_input:
+        if "বাংলাদেশ" in norm_input or "bangladesh" in norm_input: ans_bn = "বাংলাদেশের রাজধানী ঢাকা।"
+        elif "ইরান" in norm_input or "iran" in norm_input: ans_bn = "ইরানের রাজধানী তেহরান।"
+        elif "ভারত" in norm_input or "india" in norm_input: ans_bn = "ভারতের রাজধানী নতুন দিল্লি।"
+        
     elif "বড় দেশ" in norm_input or "largest country" in norm_input:
         ans_bn = "বিশ্বের সবচেয়ে বড় দেশ রাশিয়া।"
     elif "ছোট দেশ" in norm_input or "smallest country" in norm_input:
         ans_bn = "বিশ্বের সবচেয়ে ছোট দেশ ভ্যাটিকান সিটি।"
     elif "দীর্ঘতম নদী" in norm_input or "longest river" in norm_input:
         ans_bn = "বিশ্বের সবচেয়ে দীর্ঘতম নদী নীলনদ।"
+    elif "ছোট পাখি" in norm_input or "smallest bird" in norm_input:
+        ans_bn = "বিশ্বের সবচেয়ে ছোট পাখি হামিংবার্ড।"
+    elif "বড় প্রাণী" in norm_input or "largest animal" in norm_input:
+        ans_bn = "পৃথিবীর সবচেয়ে বড় প্রাণী নীল তিমি।"
+    elif "জনসংখ্যা" in norm_input and ("বাংলাদেশ" in norm_input or "bangladesh" in norm_input):
+        ans_bn = "সর্বশেষ তথ্য অনুযায়ী বাংলাদেশের জনসংখ্যা প্রায় ১৭ কোটি ২০ লাখ (২০২৪-২০২৬ আনুমানিক)।"
+    elif "national flower" in norm_input or "জাতীয় ফুল" in norm_input:
+        ans_bn = "বাংলাদেশের জাতীয় ফুল শাপলা।"
+    elif "who created" in norm_input or "who made" in norm_input or "কে তৈরি" in norm_input:
+        ans_bn = "আমাকে তৈরি করেছেন মেহেদী হাসান অনিক।"
+    elif "অলক" in norm_input:
+        ans_bn = "অলক হচ্ছে অনিকের ছোট ভাই। সে অত্যন্ত বুদ্ধিমান এবং পড়াশোনায় অতুলনীয়। সে গাজীপুরে থাকে এবং চাকরি ও পড়াশোনা একসাথে করছে।"
 
     # ২. ডাটাবেসে খোঁজা
     if not ans_bn:
@@ -160,7 +167,7 @@ def get_ai_response(user_input, history):
 
     # ৩. ইন্টারনেটে সার্চ করা
     if not ans_bn:
-        web_result = get_web_answer(user_input, detected_lang)
+        web_result = get_web_answer(user_input)
         if web_result:
             ans_bn = web_result
             is_web_search = True
@@ -170,8 +177,8 @@ def get_ai_response(user_input, history):
     # ৪. উত্তরটি ইউজারের ভাষায় অনুবাদ করা
     if detected_lang != 'bn' or is_web_search:
         try:
-            src_lang = detected_lang if is_web_search and detected_lang == 'bn' else ('en' if is_web_search else 'bn')
-            final_ans = safe_translate(ans_bn, target_lang_code) if src_lang != target_lang_code else ans_bn
+            src_lang = 'en' if is_web_search else 'bn'
+            final_ans = safe_translate(ans_bn, target_lang_code)
             return final_ans + (" 🌐" if is_web_search else "")
         except Exception:
             return ans_bn + (" 🌐" if is_web_search else "")
