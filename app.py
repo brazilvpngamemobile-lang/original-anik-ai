@@ -1,4 +1,4 @@
-import os, re, random, threading, requests
+import os, re, threading, requests
 from flask import Flask, request, jsonify, send_from_directory
 from deep_translator import GoogleTranslator, MyMemoryTranslator
 from langdetect import detect, DetectorFactory
@@ -14,13 +14,6 @@ STOPWORDS = {
     "কোন", "কোনটি", "এর", "ও", "এবং", "হলো", "আছে", "একটি", "একটা", "আমি", 
     "আমার", "আমাকে", "তুমি", "তোমার", "সে", "তার", "এটা", "এটি", "কর", "করা",
     "সব", "থেকে", "the", "is", "of", "what", "a", "an", "in", "to", "and", "are", "how", "who", "where"
-}
-
-# লোকাল ট্রান্সলেশন ডিকশনারি (ইন্টারনেট ছাড়াই কিছু শব্দ অনুবাদ করতে)
-LOCAL_TRANS = {
-    "রাজধানী": "capital", "নদী": "river", "হ্রদ": "lake", "বিশ্বের": "world",
-    "দীর্ঘতম": "longest", "বড়": "largest", "ছোট": "smallest", "উঁচু": "highest",
-    "দেশ": "country", "পাখি": "bird", "ফুল": "flower", "ফল": "fruit", "পশু": "animal"
 }
 
 def stem_bangla(word):
@@ -60,7 +53,6 @@ class KeywordRetriever:
                         best_score = score
                         best_doc = self.docs[i]
             
-            # থ্রেশহোল্ড ০.২৫ করা হলো, যাতে সহজেই ম্যাচ করে
             if best_score >= 0.25:
                 return best_doc
             return None
@@ -89,40 +81,41 @@ def safe_translate(text, target_lang):
         return GoogleTranslator(source='auto', target=target_lang).translate(text)
     except Exception:
         try:
-            mm_target = target_lang
-            if target_lang.startswith('zh'): mm_target = 'zh-CN'
-            elif target_lang == 'en': mm_target = 'en-GB'
-            elif target_lang == 'bn': mm_target = 'bn-IN'
+            mm_target = 'en-GB' if target_lang == 'en' else ('bn-IN' if target_lang == 'bn' else target_lang)
             return MyMemoryTranslator(source='auto', target=mm_target).translate(text)
         except Exception:
-            # অনুবাদ সম্পূর্ণ ফেইল করলে লোকাল ডিকশনারি ব্যবহার
-            if target_lang == 'en':
-                eng_words = []
-                for w in text.split():
-                    eng_words.append(LOCAL_TRANS.get(w, w))
-                return " ".join(eng_words)
             return text
 
-def get_web_answer(query):
+def get_web_answer(query, detected_lang):
     try:
-        # ইংরেজিতে অনুবাদ
-        eng_query = safe_translate(query, 'en')
         headers = {'User-Agent': 'AnikAI/1.0'}
-
-        # Wikipedia API সার্চ
-        search_url = f"https://en.wikipedia.org/w/api.php?action=query&list=search&srsearch={requests.utils.quote(eng_query)}&format=json"
-        res = requests.get(search_url, headers=headers, timeout=8)
         
-        if res.status_code == 200:
-            search_data = res.json()
-            if search_data['query']['search']:
-                top_title = search_data['query']['search'][0]['title']
-                summary_url = f"https://en.wikipedia.org/api/rest_v1/page/summary/{requests.utils.quote(top_title)}"
-                summary_res = requests.get(summary_url, headers=headers, timeout=5)
-                if summary_res.status_code == 200:
-                    extract = summary_res.json().get('extract')
-                    if extract:
-                        return extract
+        # যদি প্রশ্ন বাংলায় হয়, তবে সরাসরি বাংলা উইকিপিডিয়ায় সার্চ করবে (অনুবাদ লাগবে না)
+        if detected_lang == 'bn':
+            search_url = f"https://bn.wikipedia.org/w/api.php?action=query&list=search&srsearch={requests.utils.quote(query)}&format=json"
+            res = requests.get(search_url, headers=headers, timeout=8)
+            if res.status_code == 200:
+                search_data = res.json()
+                if search_data['query']['search']:
+                    top_title = search_data['query']['search'][0]['title']
+                    summary_url = f"https://bn.wikipedia.org/api/rest_v1/page/summary/{requests.utils.quote(top_title)}"
+                    summary_res = requests.get(summary_url, headers=headers, timeout=5)
+                    if summary_res.status_code == 200:
+                        return summary_res.json().get('extract')
+        else:
+            # অন্য ভাষা হলে ইংরেজিতে অনুবাদ করে ইংরেজি উইকিপিডিয়ায় সার্চ করবে
+            eng_query = safe_translate(query, 'en')
+            search_url = f"https://en.wikipedia.org/w/api.php?action=query&list=search&srsearch={requests.utils.quote(eng_query)}&format=json"
+            res = requests.get(search_url, headers=headers, timeout=8)
+            if res.status_code == 200:
+                search_data = res.json()
+                if search_data['query']['search']:
+                    top_title = search_data['query']['search'][0]['title']
+                    summary_url = f"https://en.wikipedia.org/api/rest_v1/page/summary/{requests.utils.quote(top_title)}"
+                    summary_res = requests.get(summary_url, headers=headers, timeout=5)
+                    if summary_res.status_code == 200:
+                        return summary_res.json().get('extract')
+
     except Exception as e:
         print("Web search error:", e)
     return None
@@ -139,9 +132,12 @@ def get_ai_response(user_input, history):
     ans_bn = None
     is_web_search = False
 
-    # ১. লোকাল হার্ডকোড (শুধু নিশ্চিত প্রশ্নের জন্য)
-    if ("capital" in norm_input or "রাজধানী" in norm_input) and ("bangladesh" in norm_input or "বাংলাদেশ" in norm_input):
-        ans_bn = "বাংলাদেশের রাজধানী ঢাকা।"
+    # ১. লোকাল হার্ডকোড (নিশ্চিত উত্তর)
+    if "capital" in norm_input or "রাজধানী" in norm_input:
+        if "bangladesh" in norm_input or "বাংলাদেশ" in norm_input:
+            ans_bn = "বাংলাদেশের রাজধানী ঢাকা।"
+        elif "iran" in norm_input or "ইরান" in norm_input:
+            ans_bn = "ইরানের রাজধানী তেহরান।"
     elif "national flower" in norm_input or "জাতীয় ফুল" in norm_input:
         ans_bn = "বাংলাদেশের জাতীয় ফুল শাপলা।"
     elif "national bird" in norm_input or "জাতীয় পাখি" in norm_input:
@@ -150,6 +146,12 @@ def get_ai_response(user_input, history):
         ans_bn = "আমাকে তৈরি করেছেন মেহেদী হাসান অনিক।"
     elif "অলক" in norm_input:
         ans_bn = "অলক হচ্ছে অনিকের ছোট ভাই। সে অত্যন্ত বুদ্ধিমান এবং পড়াশোনায় অতুলনীয়। সে গাজীপুরে থাকে এবং চাকরি ও পড়াশোনা একসাথে করছে।"
+    elif "বড় দেশ" in norm_input or "largest country" in norm_input:
+        ans_bn = "বিশ্বের সবচেয়ে বড় দেশ রাশিয়া।"
+    elif "ছোট দেশ" in norm_input or "smallest country" in norm_input:
+        ans_bn = "বিশ্বের সবচেয়ে ছোট দেশ ভ্যাটিকান সিটি।"
+    elif "দীর্ঘতম নদী" in norm_input or "longest river" in norm_input:
+        ans_bn = "বিশ্বের সবচেয়ে দীর্ঘতম নদী নীলনদ।"
 
     # ২. ডাটাবেসে খোঁজা
     if not ans_bn:
@@ -158,7 +160,7 @@ def get_ai_response(user_input, history):
 
     # ৩. ইন্টারনেটে সার্চ করা
     if not ans_bn:
-        web_result = get_web_answer(user_input)
+        web_result = get_web_answer(user_input, detected_lang)
         if web_result:
             ans_bn = web_result
             is_web_search = True
@@ -168,8 +170,8 @@ def get_ai_response(user_input, history):
     # ৪. উত্তরটি ইউজারের ভাষায় অনুবাদ করা
     if detected_lang != 'bn' or is_web_search:
         try:
-            src_lang = 'en' if is_web_search else 'bn'
-            final_ans = safe_translate(ans_bn, target_lang_code)
+            src_lang = detected_lang if is_web_search and detected_lang == 'bn' else ('en' if is_web_search else 'bn')
+            final_ans = safe_translate(ans_bn, target_lang_code) if src_lang != target_lang_code else ans_bn
             return final_ans + (" 🌐" if is_web_search else "")
         except Exception:
             return ans_bn + (" 🌐" if is_web_search else "")
