@@ -1,7 +1,10 @@
 import os, re, random, threading
 from flask import Flask, request, jsonify, send_from_directory
 from deep_translator import GoogleTranslator
-from langdetect import detect
+from langdetect import detect, DetectorFactory
+
+# ভাষা শনাক্তকরণে ধারাবাহিকতার জন্য সিড সেট করা
+DetectorFactory.seed = 0
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 KNOWLEDGE_FILE = os.path.join(BASE_DIR, "knowledge.txt")
@@ -11,7 +14,8 @@ STOPWORDS = {
     "কি", "কে", "কী", "নাম", "হলে", "কোথায়", "কোথায়", "কেন", "কিভাবে", "কত", 
     "কোন", "কোনটি", "এর", "ও", "এবং", "হলো", "আছে", "একটি", "একটা", "আমি", 
     "আমার", "আমাকে", "তুমি", "তোমার", "সে", "তার", "এটা", "এটি", "কর", "করা",
-    "the", "is", "of", "what", "a", "an", "in", "to", "and", "are", "how", "who", "where"
+    "the", "is", "of", "what", "a", "an", "in", "to", "and", "are", "how", "who", "where",
+    "国家", "的", "是", "什么", "名字", "の", "は", "何", "이", "는", "무엇"
 }
 
 def stem_bangla(word):
@@ -58,7 +62,6 @@ class KeywordRetriever:
                         best_score = score
                         best_doc = self.docs[i]
             
-            # ৪০% শব্দ মিললেই উত্তর দেবে
             if best_score >= 0.40:
                 return best_doc
             return None
@@ -82,49 +85,61 @@ def _train():
         print("Train error:", e)
 
 def get_ai_response(user_input, history):
-    norm = user_input.lower().strip()
-    is_bengali = bool(re.search(r'[\u0980-\u09FF]', norm))
+    # ১. ভাষা ডিটেক্ট করা
+    try:
+        detected_lang = detect(user_input)
+    except:
+        detected_lang = 'bn'
 
-    # ১. হার্ডকোড করা মাল্টি-লিঙ্গুয়াল উত্তর (১০০% সঠিকতার জন্য)
-    if ("national flower" in norm and "bangladesh" in norm) or "জাতীয় ফুল" in norm:
-        return "বাংলাদেশের জাতীয় ফুল শাপলা। (The national flower of Bangladesh is Water Lily.)"
-    
-    if ("national bird" in norm and "bangladesh" in norm) or "জাতীয় পাখি" in norm:
-        return "বাংলাদেশের জাতীয় পাখি দোয়েল। (The national bird of Bangladesh is Magpie Robin.)"
-        
-    if ("national fruit" in norm and "bangladesh" in norm) or "জাতীয় ফল" in norm:
-        return "বাংলাদেশের জাতীয় ফল কাঁঠাল। (The national fruit of Bangladesh is Jackfruit.)"
-        
-    if ("national animal" in norm and "bangladesh" in norm) or "জাতীয় পশু" in norm:
-        return "বাংলাদেশের জাতীয় পশু রয়েল বেঙ্গল টাইগার। (The national animal of Bangladesh is Royal Bengal Tiger.)"
-        
-    if ("capital" in norm and "bangladesh" in norm) or ("রাজধানী" in norm and "বাংলাদেশ" in norm):
-        return "বাংলাদেশের রাজধানী ঢাকা। (The capital of Bangladesh is Dhaka.)"
-
-    if "who created you" in norm or "who made you" in norm or "কে তৈরি" in norm or "তুমি কে" in norm:
-        return "আমাকে তৈরি করেছেন মেহেদী হাসান অনিক। (I was created by Mehedi Hasan Anik.)"
-
-    # ২. ট্রান্সলেশন (যদি বাংলা না হয়)
-    query_for_search = user_input
-    if not is_bengali:
+    # ২. যদি বাংলা না হয়, তবে বাংলায় অনুবাদ করা
+    query_in_bn = user_input
+    if detected_lang != 'bn':
         try:
-            query_for_search = GoogleTranslator(source='auto', target='bn').translate(user_input)
-        except Exception:
-            pass # ট্রান্সলেশন ফেইল করলে ইংরেজিতেই খুঁজবে
+            query_in_bn = GoogleTranslator(source='auto', target='bn').translate(user_input)
+        except Exception as e:
+            print("Translation to BN failed:", e)
+            query_in_bn = user_input # ফেইল করলে অরিজিনাল টেক্সট দিয়েই খুঁজবে
 
-    norm_search = query_for_search.lower().strip()
+    norm = query_in_bn.lower().strip()
 
-    # ৩. ডাটাবেস থেকে খোঁজা
-    ans = retriever.predict(norm_search)
-    if ans:
-        if not ans.endswith(("।", ".", "!", "?")):
-            ans += "।"
-        return ans
+    # ৩. উত্তর তৈরি করা (বাংলায়)
+    ans_bn = None
 
-    # ৪. ফলব্যাক
-    if is_bengali:
-        return "আমি এই বিষয়ে নিশ্চিত নই। আপনি কি 'Teach' বাটন (🎓) দিয়ে আমাকে এটি শিখিয়ে দেবেন?"
-    return "I'm not sure about that. Please teach me using the 'Teach' button."
+    # হার্ডকোড করা বেসিক প্রশ্ন
+    if "জাতীয় ফুল" in norm or "national flower" in norm:
+        ans_bn = "বাংলাদেশের জাতীয় ফুল শাপলা।"
+    elif "জাতীয় পাখি" in norm or "national bird" in norm:
+        ans_bn = "বাংলাদেশের জাতীয় পাখি দোয়েল।"
+    elif "জাতীয় ফল" in norm or "national fruit" in norm:
+        ans_bn = "বাংলাদেশের জাতীয় ফল কাঁঠাল।"
+    elif "জাতীয় পশু" in norm or "national animal" in norm:
+        ans_bn = "বাংলাদেশের জাতীয় পশু রয়েল বেঙ্গল টাইগার।"
+    elif "রাজধানী" in norm or "capital" in norm:
+        ans_bn = "বাংলাদেশের রাজধানী ঢাকা।"
+    elif "কে তৈরি" in norm or "who created" in norm or "who made" in norm:
+        ans_bn = "আমাকে তৈরি করেছেন মেহেদী হাসান অনিক।"
+
+    # যদি হার্ডকোডে না পাওয়া যায়, তবে ডাটাবেস থেকে খোঁজা
+    if not ans_bn:
+        ans_bn = retriever.predict(norm)
+
+    # যদি কোনো উত্তর না পাওয়া যায়
+    if not ans_bn:
+        ans_bn = "আমি এই বিষয়ে নিশ্চিত নই। আপনি কি 'Teach' বাটন (🎓) দিয়ে আমাকে এটি শিখিয়ে দেবেন?"
+
+    # ৪. যদি ইউজারের ভাষা বাংলা না হয়, তবে উত্তরটি তার ভাষায় অনুবাদ করা
+    if detected_lang != 'bn':
+        try:
+            # ভাষার কোড ম্যাপিং (কিছু ক্ষেত্রে langdetect 'zh-cn' দেয়, গুগল 'zh-CN' চায়)
+            target_lang = detected_lang.split('-')[0] 
+            final_ans = GoogleTranslator(source='bn', target=target_lang).translate(ans_bn)
+            return final_ans
+        except Exception as e:
+            print("Translation reply failed:", e)
+            # অনুবাদ ফেইল করলে বাংলা + ইংরেজি মিক্স করে দেবে
+            return f"{ans_bn}"
+
+    return ans_bn
 
 @app.route('/')
 def index(): return send_from_directory(BASE_DIR, 'index.html')
