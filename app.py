@@ -17,9 +17,11 @@ STOPWORDS = {
     "সব", "থেকে", "the", "is", "of", "what", "a", "an", "in", "to", "and", "are", "how", "who", "where"
 }
 
+# বিস্তারিত বোঝার জন্য কীওয়ার্ড
+DETAIL_KEYWORDS = ["বিস্তারিত", "বিস্তারিতভাবে", "details", "explain", "more", "কেন", "why", "history", "ইতিহাস"]
+
 def normalize_text(text):
     text = unicodedata.normalize('NFC', text.lower().strip())
-    # ড়, ঢ়, য় এর ইউনিকোড সমস্যা সমাধান
     text = text.replace('\u09DC', '\u09A1\u09BC').replace('\u09DD', '\u09A2\u09BC').replace('\u09DF', '\u09AF\u09BC')
     return text
 
@@ -88,21 +90,22 @@ def safe_translate(text, target_lang):
             return MyMemoryTranslator(source='auto', target=mm_target).translate(text)
         except: return text
 
-def get_web_answer(query, detected_lang):
+def get_web_answer(query, detected_lang, want_detail):
     try:
-        # ১. বাংলা প্রশ্ন হলে বাংলা উইকিপিডিয়ায় সার্চ
+        # ডাইনামিক সেন্টেন্স (বিস্তারিত চাইলে ৪ লাইন, না চাইলে ১ লাইন)
+        sentences = 4 if want_detail else 1 
+        
         if detected_lang == 'bn':
             wikipedia.set_lang("bn")
             results = wikipedia.search(query, results=1)
             if results:
-                return wikipedia.summary(results[0], sentences=2)
+                return wikipedia.summary(results[0], sentences=sentences)
         
-        # ২. না পেলে বা অন্য ভাষা হলে ইংরেজিতে অনুবাদ করে ইংরেজি উইকিপিডিয়ায় সার্চ
         eng_query = safe_translate(query, 'en')
         wikipedia.set_lang("en")
         results = wikipedia.search(eng_query, results=1)
         if results:
-            ans = wikipedia.summary(results[0], sentences=2)
+            ans = wikipedia.summary(results[0], sentences=sentences)
             return safe_translate(ans, 'bn') if detected_lang == 'bn' else ans
     except Exception as e:
         print("Wikipedia Error:", e)
@@ -115,26 +118,41 @@ def get_ai_response(user_input, history):
     ans_bn = None
     is_web_search = False
 
+    # ইউজার বিস্তারিত চাইছে কিনা চেক করা
+    want_detail = any(kw in norm_input for kw in DETAIL_KEYWORDS)
+
     # ==========================================
-    # ১. লোকাল হার্ডকোড (সাধারণ প্রশ্নের নিশ্চিত উত্তর)
+    # ১. লোকাল হার্ডকোড (প্রয়োজন অনুযায়ী ছোট বা বড় উত্তর)
     # ==========================================
-    if "বিল গেটস" in norm_input or "bill gates" in norm_input:
-        ans_bn = "বিল গেটস মাইক্রোসফটের সহ-প্রতিষ্ঠাতা এবং বিশ্বের অন্যতম ধনী ব্যক্তি।"
+    if "ইংল্যান্ড" in norm_input and "রাজা" in norm_input:
+        if want_detail:
+            ans_bn = "যুক্তরাজ্যের বর্তমান রাজা তৃতীয় চার্লস। তিনি ২০২২ সালের ৮ সেপ্টেম্বর তার মা দ্বিতীয় এলিজাবেথের মৃত্যুর পর সিংহাসনে আরোহণ করেন।"
+        else:
+            ans_bn = "যুক্তরাজ্যের বর্তমান রাজা তৃতীয় চার্লস।"
+            
+    elif "বিল গেটস" in norm_input or "bill gates" in norm_input:
+        if want_detail:
+            ans_bn = "বিল গেটস মাইক্রোসফটের সহ-প্রতিষ্ঠাতা। তিনি বিশ্বের অন্যতম ধনী ব্যক্তি এবং বিল অ্যান্ড মেলিন্ডা গেটস ফাউন্ডেশনের মাধ্যমে দানশীলতায় কাজ করেন।"
+        else:
+            ans_bn = "বিল গেটস মাইক্রোসফটের সহ-প্রতিষ্ঠাতা।"
+            
     elif "eva elfie" in norm_input:
-        ans_bn = "ইভা এলফি (Eva Elfie) একজন রাশিয়ান মডেল এবং প্রাপ্তবয়স্ক চলচ্চিত্র অভিনেত্রী।"
+        if want_detail:
+            ans_bn = "ইভা এলফি (Eva Elfie) একজন রাশিয়ান মডেল এবং প্রাপ্তবয়স্ক চলচ্চিত্র অভিনেত্রী। তিনি সোশ্যাল মিডিয়ায় ব্যাপক জনপ্রিয়।"
+        else:
+            ans_bn = "ইভা এলফি (Eva Elfie) একজন রাশিয়ান মডেল এবং প্রাপ্তবয়স্ক চলচ্চিত্র অভিনেত্রী।"
+            
     elif "বড় দেশ" in norm_input or "বৃহত্তম দেশ" in norm_input or "largest country" in norm_input:
-        ans_bn = "বিশ্বের সবচেয়ে বড় দেশ রাশিয়া।"
-    elif "ছোট দেশ" in norm_input or "smallest country" in norm_input:
-        ans_bn = "বিশ্বের সবচেয়ে ছোট দেশ ভ্যাটিকান সিটি।"
+        if want_detail:
+            ans_bn = "আয়তনের দিক থেকে বিশ্বের সবচেয়ে বড় দেশ রাশিয়া। এর আয়তন প্রায় ১ কোটি ৭১ লক্ষ বর্গকিলোমিটার, যা পৃথিবীর মোট ভূমির প্রায় ১১%।"
+        else:
+            ans_bn = "বিশ্বের সবচেয়ে বড় দেশ রাশিয়া।"
+            
     elif "চায়না" in norm_input or "চীন" in norm_input or "china" in norm_input:
-        ans_bn = "চীন (China) পূর্ব এশিয়ার একটি দেশ। এটি জনসংখ্যার দিক থেকে বিশ্বের সবচেয়ে বড় দেশ এবং আয়তনে তৃতীয়।"
-    elif "পিরামিডের দেশ" in norm_input:
-        ans_bn = "মিশরকে পিরামিডের দেশ বলা হয়।"
-    elif "দীর্ঘতম নদী" in norm_input or "longest river" in norm_input:
-        ans_bn = "বিশ্বের সবচেয়ে দীর্ঘতম নদী নীলনদ।"
-    elif "রাজধানী" in norm_input or "capital" in norm_input:
-        if "বাংলাদেশ" in norm_input or "bangladesh" in norm_input: ans_bn = "বাংলাদেশের রাজধানী ঢাকা।"
-        elif "ভারত" in norm_input or "india" in norm_input: ans_bn = "ভারতের রাজধানী নতুন দিল্লি।"
+        if want_detail:
+            ans_bn = "চীন (China) পূর্ব এশিয়ার একটি দেশ। এটি জনসংখ্যার দিক থেকে বিশ্বের সবচেয়ে বড় দেশ এবং আয়তনে তৃতীয়। এর রাজধানী বেইজিং।"
+        else:
+            ans_bn = "চীন পূর্ব এশিয়ার একটি দেশ, যার রাজধানী বেইজিং।"
 
     # ==========================================
     # ২. ডাটাবেসে খোঁজা
@@ -147,12 +165,12 @@ def get_ai_response(user_input, history):
     # ৩. ইন্টারনেটে সার্চ করা (উইকিপিডিয়া এপিআই)
     # ==========================================
     if not ans_bn:
-        web_result = get_web_answer(user_input, detected_lang)
+        web_result = get_web_answer(user_input, detected_lang, want_detail)
         if web_result:
             ans_bn = web_result
             is_web_search = True
         else:
-            ans_bn = "আমি এই বিষয়ে ইন্টারনেটে বা আমার ডাটাবেসে কোনো তথ্য খুঁজে পাইনি। আপনি কি 'Teach' বাটন (🎓) দিয়ে আমাকে এটি শিখিয়ে দেবেন?"
+            ans_bn = "আমি এই বিষয়ে কোনো তথ্য খুঁজে পাইনি। আপনি কি 'Teach' বাটন (🎓) দিয়ে আমাকে এটি শিখিয়ে দেবেন?"
 
     # ==========================================
     # ৪. উত্তরটি ইউজারের ভাষায় অনুবাদ করা
