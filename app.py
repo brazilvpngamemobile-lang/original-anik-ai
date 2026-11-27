@@ -1,12 +1,13 @@
-import os, re, random, json, threading, math
+import os, re, random, threading, math
 from collections import Counter
 from flask import Flask, request, jsonify, send_from_directory
+from deep_translator import GoogleTranslator
+from langdetect import detect
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 KNOWLEDGE_FILE = os.path.join(BASE_DIR, "knowledge.txt")
 app = Flask(__name__)
 
-# বাংলা ও ইংরেজি অপ্রয়োজনীয় শব্দ (Stopwords)
 STOPWORDS = {
     "কি", "কে", "কী", "নাম", "হলে", "কোথায়", "কোথায়", "কেন", "কিভাবে", "কত", 
     "কোন", "কোনটি", "এর", "ও", "এবং", "হলো", "আছে", "একটি", "একটা", "আমি", 
@@ -14,16 +15,6 @@ STOPWORDS = {
     "the", "is", "of", "what", "a", "an", "in", "to", "and", "are", "how", "who", "where"
 }
 
-# ইংরেজি প্রশ্নকে বাংলায় ম্যাপ করার ডিকশনারি (Cross-Lingual Match)
-TRANSLATION_MAP = {
-    "flower": "ফুল", "bird": "পাখি", "capital": "রাজধানী", "fruit": "ফল", 
-    "animal": "পশু", "river": "নদী", "country": "দেশ", "national": "জাতীয়",
-    "largest": "বড়", "smallest": "ছোট", "longest": "দীর্ঘতম", "highest": "উঁচু",
-    "ocean": "মহাসাগর", "continent": "মহাদেশ", "creator": "নির্মাতা", "founder": "প্রতিষ্ঠাতা",
-    "birth": "জন্ম", "died": "মৃত্যু", "president": "রাষ্ট্রপতি", "minister": "মন্ত্রী"
-}
-
-# বাংলা প্রত্যয় ছাঁটাই (Stemming)
 def stem_bangla(word):
     suffixes = ['ের', 'টি', 'কে', 'রা', 'দের', 'তে', 'রে', 'টির', 'টিতে', 'টার', 'টাকে', 'য়ের', 'য়']
     for suffix in suffixes:
@@ -42,8 +33,6 @@ class SmartRetriever:
         words = re.findall(r'[\u0980-\u09FF\w]+', text.lower())
         clean_words = []
         for w in words:
-            if w in TRANSLATION_MAP:
-                w = TRANSLATION_MAP[w] # ইংরেজি থেকে বাংলায় রূপান্তর
             if w not in STOPWORDS:
                 clean_words.append(stem_bangla(w))
         return clean_words
@@ -79,7 +68,7 @@ class SmartRetriever:
             vec = {w: v / norm for w, v in vec.items()}
         return vec
 
-    def predict(self, text, threshold=0.30):
+    def predict(self, text, threshold=0.20):
         with self.lock:
             if not self.doc_vectors:
                 return None
@@ -101,10 +90,6 @@ class SmartRetriever:
             if best_score >= threshold and best_idx >= 0:
                 return self.docs[best_idx]
             return None
-
-    def stats(self):
-        with self.lock:
-            return {"docs": len(self.docs), "idf_terms": len(self.idf)}
 
 retriever = SmartRetriever()
 file_lock = threading.Lock()
@@ -128,34 +113,56 @@ def _train():
         print("Train error:", e)
 
 def get_ai_response(user_input, history):
-    norm = user_input.lower().strip()
-    is_bengali = bool(re.search(r'[\u0980-\u09FF]', norm))
+    # ভাষা ডিটেক্ট করা
+    try:
+        detected_lang = detect(user_input)
+    except:
+        detected_lang = 'bn'
+        
+    is_bengali = bool(re.search(r'[\u0980-\u09FF]', user_input))
+    
+    # যদি বাংলা না হয়, তবে প্রশ্নটি বাংলায় অনুবাদ করে নেওয়া
+    query_for_search = user_input
+    if not is_bengali:
+        try:
+            query_for_search = GoogleTranslator(source='auto', target='bn').translate(user_input)
+        except Exception as e:
+            print("Translation error:", e)
+            query_for_search = user_input
 
-    # Hardcoded Intents
-    if any(k in norm for k in ["অনিক নুডলস", "অনিকের প্রিয় খাবার", "অনিক কি পছন্দ করে"]):
-        return "অনিক নুডলস খুব বেশি পছন্দ করে!"
-    if any(k in norm for k in ["ভালোবাসে", "ভালোবাসা", "love"]):
-        if "অনিক" in norm or "জনি" in norm:
-            return "অনিক জনিকে অনেক ভালোবাসে এবং জনিও অনিকে অনেক ভালোবাসে।"
-    if any(k in norm for k in ["অলক", "ছোট ভাই", "alok"]):
-        return "অলক হলো অনিকের ছোট ভাই। সে অত্যন্ত বুদ্ধিমান এবং পড়াশোনায় অতুলনীয়। সে গাজীপুরে থাকে এবং চাকরি ও পড়াশোনা একসাথে করছে।"
-    if any(k in norm for k in ["জনি কে", "জনি কি", "যোনি কে"]):
-        return "জনি হলো অনিকের স্ত্রী। তাদের বিয়ে হয়েছে ২৮ নভেম্বর ২০২৫ সালে। জনির বাড়ি পাইকশা।"
-    if any(k in norm for k in ["অনিক কে", "অনিক কি", "কে অনিক"]):
-        return "অনিকের সম্পূর্ণ নাম মেহেদী হাসান অনিক। তিনিই আমাকে তৈরি করেছেন। তিনি একজন অসাধারণ, প্রতিভাবান এবং উদ্ভাবনী ডেভেলপার।"
-    if any(k in norm for k in ["কে তৈরি", "কি দিয়ে তৈরি", "who created", "who are you", "তুমি কে"]):
-        return "আমাকে তৈরি করেছেন মেহেদী হাসান অনিক। তিনি একজন অসাধারণ, প্রতিভাবান এবং উদ্ভাবনী ডেভেলপার।"
+    norm = query_for_search.lower().strip()
 
-    # Retriever
-    ans = retriever.predict(norm)
-    if ans:
-        if not ans.endswith(("।", ".", "!", "?")):
-            ans += "।"
-        return ans
+    # Direct Hardcoded Responses (Bengali)
+    if any(k in norm for k in ["অনিক নুডলস", "অনিকের প্রিয় খাবার", "অনিক কি পছন্দ করে"]):
+        ans = "অনিক নুডলস খুব বেশি পছন্দ করে!"
+    elif any(k in norm for k in ["ভালোবাসে", "ভালোবাসা"]):
+        ans = "অনিক জনিকে অনেক ভালোবাসে এবং জনিও অনিকে অনেক ভালোবাসে।"
+    elif any(k in norm for k in ["অলক", "ছোট ভাই"]):
+        ans = "অলক হলো অনিকের ছোট ভাই। সে অত্যন্ত বুদ্ধিমান এবং পড়াশোনায় অতুলনীয়। সে গাজীপুরে থাকে এবং চাকরি ও পড়াশোনা একসাথে করছে।"
+    elif any(k in norm for k in ["জনি কে", "জনি কি"]):
+        ans = "জনি হলো অনিকের স্ত্রী। তাদের বিয়ে হয়েছে ২৮ নভেম্বর ২০২৫ সালে। জনির বাড়ি পাইকশা।"
+    elif any(k in norm for k in ["অনিক কে", "অনিক কি", "কে অনিক"]):
+        ans = "অনিকের সম্পূর্ণ নাম মেহেদী হাসান অনিক। তিনিই আমাকে তৈরি করেছেন। তিনি একজন অসাধারণ, প্রতিভাবান এবং উদ্ভাবনী ডেভেলপার।"
+    elif any(k in norm for k in ["কে তৈরি", "কি দিয়ে তৈরি", "তুমি কে"]):
+        ans = "আমাকে তৈরি করেছেন মেহেদী হাসান অনিক। তিনি একজন অসাধারণ, প্রতিভাবান এবং উদ্ভাবনী ডেভেলপার।"
+    else:
+        # Retriever Fallback
+        ans = retriever.predict(norm)
+        if ans:
+            if not ans.endswith(("।", ".", "!", "?")):
+                ans += "।"
+        else:
+            ans = "আমি এই বিষয়ে নিশ্চিত নই। আপনি কি 'Teach' বাটন (🎓) দিয়ে আমাকে এটি শিখিয়ে দেবেন?"
 
-    if is_bengali:
-        return "আমি এই বিষয়ে নিশ্চিত নই। আপনি কি 'Teach' বাটন (🎓) দিয়ে আমাকে এটি শিখিয়ে দেবেন?"
-    return "I'm not sure about that. Please teach me using the 'Teach' button."
+    # যদি ইউজারের ভাষা বাংলা না হয়, তবে উত্তরটি তার ভাষায় অনুবাদ করে দেওয়া
+    if detected_lang != 'bn' and not is_bengali:
+        try:
+            ans = GoogleTranslator(source='bn', target=detected_lang).translate(ans)
+        except Exception as e:
+            print("Reply translation error:", e)
+            pass # ত্রুটি হলে বাংলাতেই থাকবে
+
+    return ans
 
 @app.route('/')
 def index(): return send_from_directory(BASE_DIR, 'index.html')
@@ -167,7 +174,7 @@ def ask():
         reply = get_ai_response(data.get('message', ''), data.get('history', []))
         return jsonify({'reply': reply})
     except Exception as e:
-        return jsonify({'reply': 'দুঃখিত, একটি সমস্যা হয়েছে।'}), 500
+        return jsonify({'reply': 'দুঃখিত, একটি সমস্যা হয়েছে। / Sorry, an error occurred.'}), 500
 
 @app.route('/teach', methods=['POST'])
 def teach():
@@ -185,7 +192,7 @@ def teach():
                 if needs_nl: f.write("\n")
                 f.write(fact + "\n")
         threading.Thread(target=_train, daemon=True).start()
-        return jsonify({'reply': 'দারুণ! নতুন এই তথ্যটি শিখে নিলাম।'})
+        return jsonify({'reply': 'দারুণ! নতুন এই তথ্যটি শিখে নিলাম। / Great! I have learned this.'})
     except Exception as e:
         return jsonify({'reply': 'তথ্য সংরক্ষণে সমস্যা হয়েছে।'}), 500
 
