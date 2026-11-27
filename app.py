@@ -17,8 +17,13 @@ STOPWORDS = {
 }
 
 def normalize_text(text):
-    # "বড়" এবং "বড়" এর মতো ইউনিকোড সমস্যা সমাধান করে
     return unicodedata.normalize('NFC', text.lower().strip())
+
+def clean_search_query(text):
+    # সার্চ করার আগে "কে", "কি", "who", "is" ইত্যাদি শব্দ বাদ দেওয়া
+    text = re.sub(r'\b(কে|কি|কী|who|is|what|the|a|an)\b', '', text, flags=re.IGNORECASE)
+    text = re.sub(r'\s+', ' ', text).strip()
+    return text
 
 def stem_bangla(word):
     suffixes = ['ের', 'টি', 'কে', 'রা', 'দের', 'তে', 'রে', 'টির', 'টিতে', 'টার', 'টাকে', 'য়ের', 'য়']
@@ -94,8 +99,11 @@ def get_web_answer(query, detected_lang):
     try:
         headers = {'User-Agent': 'Mozilla/5.0 (AnikAI/1.0)'}
         
+        # অপ্রয়োজনীয় শব্দ বাদ দেওয়া (যেমন: "বিল গেটস কে" থেকে "কে" বাদ যাবে)
+        clean_query = clean_search_query(query)
+        
         # ১. প্রথমে বাংলা উইকিপিডিয়ায় খোঁজা
-        search_url_bn = f"https://bn.wikipedia.org/w/api.php?action=query&list=search&srsearch={requests.utils.quote(query)}&format=json"
+        search_url_bn = f"https://bn.wikipedia.org/w/api.php?action=query&list=search&srsearch={requests.utils.quote(clean_query)}&format=json"
         res_bn = requests.get(search_url_bn, headers=headers, timeout=8)
         if res_bn.status_code == 200:
             search_data_bn = res_bn.json()
@@ -108,7 +116,7 @@ def get_web_answer(query, detected_lang):
                     if extract: return extract
 
         # ২. বাংলায় না পেলে ইংরেজিতে অনুবাদ করে খোঁজা
-        eng_query = safe_translate(query, 'en')
+        eng_query = safe_translate(clean_query, 'en')
         search_url_en = f"https://en.wikipedia.org/w/api.php?action=query&list=search&srsearch={requests.utils.quote(eng_query)}&format=json"
         res_en = requests.get(search_url_en, headers=headers, timeout=8)
         if res_en.status_code == 200:
@@ -137,19 +145,17 @@ def get_ai_response(user_input, history):
     ans_bn = None
     is_web_search = False
 
-    # ১. লোকাল হার্ডকোড (আগের বাদ পড়া প্রশ্নগুলো ফিরিয়ে আনা হলো)
+    # ১. লোকাল হার্ডকোড
     if "জনি কে" in norm_input or "জনি কি" in norm_input:
         ans_bn = "জনি হলো অনিকের স্ত্রী। তাদের বিয়ে হয়েছে ২৮ নভেম্বর ২০২৫ সালে। জনির বাড়ি পাইকশা।"
     elif "অনিক কে" in norm_input or "অনিক কি" in norm_input:
-        ans_bn = "অনিকের সম্পূর্ণ নাম মেহেদী হাসান অনিক। তিনিই আমাকে তৈরি করেছেন। তিনি একজন অসাধারণ, প্রতিভাবান এবং উদ্ভাবনী ডেভেলপার।"
+        ans_bn = "অনিকের সম্পূর্ণ নাম মেহেদী হাসান অনিক। তিনিই আমাকে তৈরি করেছেন।"
     elif "কে তৈরি" in norm_input or "who created" in norm_input:
         ans_bn = "আমাকে তৈরি করেছেন মেহেদী হাসান অনিক।"
     elif "বিয়ে" in norm_input:
         ans_bn = "অনিক এবং জনির বিয়ে হয়েছে ২৮ নভেম্বর ২০২৫ সালে।"
     elif "অলক" in norm_input:
-        ans_bn = "অলক হচ্ছে অনিকের ছোট ভাই। সে অত্যন্ত বুদ্ধিমান এবং পড়াশোনায় অতুলনীয়। সে গাজীপুরে থাকে এবং চাকরি ও পড়াশোনা একসাথে করছে।"
-    
-    # রাজধানী, বড়-ছোট দেশ (ইউনিকোড ঠিক করা হয়েছে)
+        ans_bn = "অলক হচ্ছে অনিকের ছোট ভাই। সে অত্যন্ত বুদ্ধিমান এবং পড়াশোনায় অতুলনীয়।"
     elif "রাজধানী" in norm_input or "capital" in norm_input:
         if "বাংলাদেশ" in norm_input or "bangladesh" in norm_input: ans_bn = "বাংলাদেশের রাজধানী ঢাকা।"
         elif "ইরান" in norm_input or "iran" in norm_input: ans_bn = "ইরানের রাজধানী তেহরান।"
@@ -158,10 +164,6 @@ def get_ai_response(user_input, history):
         ans_bn = "বিশ্বের সবচেয়ে বড় দেশ রাশিয়া।"
     elif "ছোট দেশ" in norm_input or "smallest country" in norm_input:
         ans_bn = "বিশ্বের সবচেয়ে ছোট দেশ ভ্যাটিকান সিটি।"
-    elif "ছোট পাখি" in norm_input or "smallest bird" in norm_input:
-        ans_bn = "বিশ্বের সবচেয়ে ছোট পাখি হামিংবার্ড।"
-    elif "দীর্ঘতম নদী" in norm_input or "longest river" in norm_input:
-        ans_bn = "বিশ্বের সবচেয়ে দীর্ঘতম নদী নীলনদ।"
 
     # ২. ডাটাবেসে খোঁজা
     if not ans_bn:
@@ -180,8 +182,6 @@ def get_ai_response(user_input, history):
     # ৪. উত্তরটি ইউজারের ভাষায় অনুবাদ করা
     if detected_lang != 'bn' or is_web_search:
         try:
-            # ওয়েব সার্চ থেকে আসা বাংলা বা ইংরেজি উত্তরকে ইউজারের ভাষায় অনুবাদ করা
-            src_lang = 'auto' 
             final_ans = safe_translate(ans_bn, target_lang_code)
             return final_ans + (" 🌐" if is_web_search else "")
         except Exception:
