@@ -1,6 +1,7 @@
 import os, re, random, threading, requests
+from bs4 import BeautifulSoup
 from flask import Flask, request, jsonify, send_from_directory
-from deep_translator import GoogleTranslator
+from deep_translator import GoogleTranslator, MyMemoryTranslator
 from langdetect import detect, DetectorFactory
 
 DetectorFactory.seed = 0
@@ -52,9 +53,7 @@ class KeywordRetriever:
                     if score > best_score:
                         best_score = score
                         best_doc = self.docs[i]
-            
-            # স্কোর ০.৪০ থেকে কমিয়ে ০.২৫ করা হলো, যাতে ছোট প্রশ্নও ম্যাচ করে
-            if best_score >= 0.25:
+            if best_score >= 0.30:
                 return best_doc
             return None
 
@@ -76,41 +75,68 @@ def _train():
     except Exception as e:
         print("Train error:", e)
 
-# --- নতুন উন্নত ওয়েব সার্চ ইঞ্জিন (Wikipedia API) ---
+def safe_translate(text, target_lang):
+    if not text.strip(): return text
+    try:
+        return GoogleTranslator(source='auto', target=target_lang).translate(text)
+    except Exception:
+        try:
+            mm_target = target_lang
+            if target_lang.startswith('zh'): mm_target = 'zh-CN'
+            elif target_lang == 'en': mm_target = 'en-GB'
+            elif target_lang == 'bn': mm_target = 'bn-IN'
+            return MyMemoryTranslator(source='auto', target=mm_target).translate(text)
+        except Exception:
+            return text
+
+# --- নতুন শক্তিশালী ওয়েব সার্চ (DuckDuckGo HTML) ---
 def get_web_answer(query):
     try:
+        # ইংরেজিতে অনুবাদ করা (সার্চ রেজাল্ট ভালো পাওয়ার জন্য)
         eng_query = query
         if not bool(re.search(r'[a-zA-Z]', query)):
-            eng_query = GoogleTranslator(source='auto', target='en').translate(query)
+            eng_query = safe_translate(query, 'en')
 
-        headers = {'User-Agent': 'AnikAI/1.0 (https://github.com/brazilvpngamemobile-lang/original-anik-ai)'}
+        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
         
-        # ১. Wikipedia-তে সার্চ করা
-        search_url = f"https://en.wikipedia.org/w/api.php?action=query&list=search&srsearch={eng_query}&format=json"
-        res = requests.get(search_url, headers=headers, timeout=5)
+        # DuckDuckGo HTML সার্চ
+        url = f"https://html.duckduckgo.com/html/?q={requests.utils.quote(eng_query)}"
+        res = requests.get(url, headers=headers, timeout=8)
         
         if res.status_code == 200:
-            search_data = res.json()
+            soup = BeautifulSoup(res.text, 'html.parser')
+            results = soup.find_all('a', class_='result__snippet')
+            if results:
+                # প্রথম রেজাল্টের টেক্সট নেওয়া
+                return results[0].get_text(strip=True)
+
+        # ব্যর্থ হলে Wikipedia Fallback
+        wiki_url = f"https://en.wikipedia.org/w/api.php?action=query&list=search&srsearch={requests.utils.quote(eng_query)}&format=json"
+        wiki_res = requests.get(wiki_url, headers=headers, timeout=5)
+        if wiki_res.status_code == 200:
+            search_data = wiki_res.json()
             if search_data['query']['search']:
                 top_title = search_data['query']['search'][0]['title']
-                
-                # ২. টাইটেল পেলে তার সামারি বের করা
-                summary_url = f"https://en.wikipedia.org/api/rest_v1/page/summary/{top_title}"
+                summary_url = f"https://en.wikipedia.org/api/rest_v1/page/summary/{requests.utils.quote(top_title)}"
                 summary_res = requests.get(summary_url, headers=headers, timeout=5)
                 if summary_res.status_code == 200:
-                    extract = summary_res.json().get('extract')
-                    if extract:
-                        return extract
+                    return summary_res.json().get('extract')
+
     except Exception as e:
         print("Web search error:", e)
     return None
 
 def get_ai_response(user_input, history):
     norm_input = user_input.lower().strip()
-    try:
-        detected_lang = detect(user_input)
-    except:
+    
+    # বাংলা অক্ষর থাকলে সরাসরি বাংলা ধরে নেওয়া
+    if re.search(r'[\u0980-\u09FF]', norm_input):
         detected_lang = 'bn'
+    else:
+        try:
+            detected_lang = detect(user_input)
+        except:
+            detected_lang = 'en'
 
     target_lang_code = detected_lang
     if target_lang_code.startswith('zh'): target_lang_code = 'zh-CN'
@@ -118,10 +144,10 @@ def get_ai_response(user_input, history):
     ans_bn = None
     is_web_search = False
 
-    # ১. লোকাল হার্ডকোড (বেসিক প্রশ্নের জন্য)
+    # ১. লোকাল হার্ডকোড
     if "首都" in norm_input or "首都是" in norm_input:
         ans_bn = "বাংলাদেশের রাজধানী ঢাকা।"
-    elif "国花" in norm_input or "national flower" in norm_input or "জাতীয় ফুল" in norm_input:
+    elif "national flower" in norm_input or "জাতীয় ফুল" in norm_input:
         ans_bn = "বাংলাদেশের জাতীয় ফুল শাপলা।"
     elif "national bird" in norm_input or "জাতীয় পাখি" in norm_input:
         ans_bn = "বাংলাদেশের জাতীয় পাখি দোয়েল।"
@@ -129,23 +155,14 @@ def get_ai_response(user_input, history):
         ans_bn = "বাংলাদেশের রাজধানী ঢাকা।"
     elif "who created" in norm_input or "who made" in norm_input or "কে তৈরি" in norm_input:
         ans_bn = "আমাকে তৈরি করেছেন মেহেদী হাসান অনিক।"
-    
-    # অলক ও অন্যান্য নির্দিষ্ট প্রশ্ন
     elif "অলক" in norm_input:
         ans_bn = "অলক হচ্ছে অনিকের ছোট ভাই। সে অত্যন্ত বুদ্ধিমান এবং পড়াশোনায় অতুলনীয়। সে গাজীপুরে থাকে এবং চাকরি ও পড়াশোনা একসাথে করছে।"
-    elif "বড় দেশ" in norm_input or "largest country" in norm_input:
-        ans_bn = "বিশ্বের সবচেয়ে বড় দেশ রাশিয়া।"
-    elif "ছোট দেশ" in norm_input or "smallest country" in norm_input:
-        ans_bn = "বিশ্বের সবচেয়ে ছোট দেশ ভ্যাটিকান সিটি।"
 
     # ২. ডাটাবেসে খোঁজা
     if not ans_bn:
         query_in_bn = user_input
         if detected_lang != 'bn':
-            try:
-                query_in_bn = GoogleTranslator(source='auto', target='bn').translate(user_input)
-            except Exception:
-                pass
+            query_in_bn = safe_translate(user_input, 'bn')
         ans_bn = retriever.predict(query_in_bn.lower().strip())
 
     # ৩. ইন্টারনেটে সার্চ করা
@@ -161,7 +178,7 @@ def get_ai_response(user_input, history):
     if detected_lang != 'bn' or is_web_search:
         try:
             src_lang = 'en' if is_web_search else 'bn'
-            final_ans = GoogleTranslator(source=src_lang, target=target_lang_code).translate(ans_bn)
+            final_ans = safe_translate(ans_bn, target_lang_code)
             return final_ans + (" 🌐" if is_web_search else "")
         except Exception:
             return ans_bn + (" 🌐" if is_web_search else "")
