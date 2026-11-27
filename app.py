@@ -1,4 +1,5 @@
-import os, re, random, threading
+import os, re, random, threading, requests
+from bs4 import BeautifulSoup
 from flask import Flask, request, jsonify, send_from_directory
 from deep_translator import GoogleTranslator
 from langdetect import detect, DetectorFactory
@@ -13,8 +14,7 @@ STOPWORDS = {
     "কি", "কে", "কী", "নাম", "হলে", "কোথায়", "কোথায়", "কেন", "কিভাবে", "কত", 
     "কোন", "কোনটি", "এর", "ও", "এবং", "হলো", "আছে", "একটি", "একটা", "আমি", 
     "আমার", "আমাকে", "তুমি", "তোমার", "সে", "তার", "এটা", "এটি", "কর", "করা",
-    "the", "is", "of", "what", "a", "an", "in", "to", "and", "are", "how", "who", "where",
-    "国家", "的", "是", "什么", "名字", "の", "は", "何", "이", "는", "무엇"
+    "the", "is", "of", "what", "a", "an", "in", "to", "and", "are", "how", "who", "where"
 }
 
 def stem_bangla(word):
@@ -32,11 +32,7 @@ class KeywordRetriever:
 
     def tokenize(self, text):
         words = re.findall(r'[\u0980-\u09FF\w]+', text.lower())
-        clean_words = []
-        for w in words:
-            if w not in STOPWORDS:
-                clean_words.append(stem_bangla(w))
-        return set(clean_words)
+        return set(stem_bangla(w) for w in words if w not in STOPWORDS)
 
     def fit(self, lines):
         with self.lock:
@@ -48,10 +44,7 @@ class KeywordRetriever:
         with self.lock:
             q_tokens = self.tokenize(text)
             if not q_tokens: return None
-            
-            best_doc = None
-            best_score = 0
-            
+            best_doc, best_score = None, 0
             for i, d_tokens in enumerate(self.doc_tokens):
                 intersection = len(q_tokens.intersection(d_tokens))
                 union = len(q_tokens.union(d_tokens))
@@ -60,7 +53,6 @@ class KeywordRetriever:
                     if score > best_score:
                         best_score = score
                         best_doc = self.docs[i]
-            
             if best_score >= 0.40:
                 return best_doc
             return None
@@ -83,9 +75,33 @@ def _train():
     except Exception as e:
         print("Train error:", e)
 
+# --- নতুন হালকা ওয়েব সার্চ ইঞ্জিন ---
+def get_web_answer(query):
+    try:
+        eng_query = query
+        if not bool(re.search(r'[a-zA-Z]', query)):
+            eng_query = GoogleTranslator(source='auto', target='en').translate(query)
+
+        # ১. DuckDuckGo Instant Answer API (সবচেয়ে ফাস্ট)
+        url = f"https://api.duckduckgo.com/?q={eng_query}&format=json&no_html=1"
+        res = requests.get(url, timeout=5).json()
+        if res.get('AbstractText'):
+            return res['AbstractText']
+        elif res.get('Answer'):
+            return res['Answer']
+
+        # ২. Wikipedia API
+        wiki_url = f"https://en.wikipedia.org/api/rest_v1/page/summary/{eng_query.replace(' ', '_')}"
+        wiki_res = requests.get(wiki_url, timeout=5)
+        if wiki_res.status_code == 200:
+            return wiki_res.json().get('extract', None)
+            
+    except Exception as e:
+        print("Web search error:", e)
+    return None
+
 def get_ai_response(user_input, history):
     norm_input = user_input.lower().strip()
-    
     try:
         detected_lang = detect(user_input)
     except:
@@ -95,38 +111,13 @@ def get_ai_response(user_input, history):
     if target_lang_code.startswith('zh'): target_lang_code = 'zh-CN'
 
     ans_bn = None
+    is_web_search = False
 
-    # ========================================================
-    # ১. লোকাল মাল্টি-লিঙ্গুয়াল ডিকশনারি (API ছাড়াই কাজ করবে)
-    # ========================================================
-    
-    # --- চাইনিজ (Chinese) ---
+    # ১. লোকাল মাল্টি-লিঙ্গুয়াল ডিকশনারি
     if "首都" in norm_input or "首都是" in norm_input:
         ans_bn = "বাংলাদেশের রাজধানী ঢাকা।"
     elif "国花" in norm_input:
         ans_bn = "বাংলাদেশের জাতীয় ফুল শাপলা।"
-    elif "国鸟" in norm_input:
-        ans_bn = "বাংলাদেশের জাতীয় পাখি দোয়েল।"
-        
-    # --- হিন্দি (Hindi) ---
-    elif "राजधानी" in norm_input:
-        ans_bn = "বাংলাদেশের রাজধানী ঢাকা।"
-    elif "राष्ट्रीय फूल" in norm_input:
-        ans_bn = "বাংলাদেশের জাতীয় ফুল শাপলা।"
-        
-    # --- আরবি (Arabic) ---
-    elif "عاصمة" in norm_input:
-        ans_bn = "বাংলাদেশের রাজধানী ঢাকা।"
-    elif "الزهرة الوطنية" in norm_input:
-        ans_bn = "বাংলাদেশের জাতীয় ফুল শাপলা।"
-        
-    # --- স্প্যানিশ (Spanish) ---
-    elif "capital" in norm_input and ("bangladesh" in norm_input or "banglades" in norm_input):
-        ans_bn = "বাংলাদেশের রাজধানী ঢাকা।"
-    elif "flor nacional" in norm_input:
-        ans_bn = "বাংলাদেশের জাতীয় ফুল শাপলা।"
-
-    # --- ইংরেজি (English) ও বাংলা (Bengali) ---
     elif "national flower" in norm_input or "জাতীয় ফুল" in norm_input:
         ans_bn = "বাংলাদেশের জাতীয় ফুল শাপলা।"
     elif "national bird" in norm_input or "জাতীয় পাখি" in norm_input:
@@ -136,37 +127,33 @@ def get_ai_response(user_input, history):
     elif "who created" in norm_input or "who made" in norm_input or "কে তৈরি" in norm_input:
         ans_bn = "আমাকে তৈরি করেছেন মেহেদী হাসান অনিক।"
 
-    # ========================================================
-    # ২. ডিকশনারিতে না পেলে, গুগল ট্রান্সলেটর দিয়ে খোঁজা
-    # ========================================================
+    # ২. ডাটাবেসে খোঁজা
     if not ans_bn:
         query_in_bn = user_input
         if detected_lang != 'bn':
             try:
                 query_in_bn = GoogleTranslator(source='auto', target='bn').translate(user_input)
-            except Exception as e:
-                print("Translation failed:", e)
-                
-        norm = query_in_bn.lower().strip()
-        
-        if "জাতীয় ফুল" in norm: ans_bn = "বাংলাদেশের জাতীয় ফুল শাপলা।"
-        elif "জাতীয় পাখি" in norm: ans_bn = "বাংলাদেশের জাতীয় পাখি দোয়েল।"
-        elif "রাজধানী" in norm: ans_bn = "বাংলাদেশের রাজধানী ঢাকা।"
-        else: 
-            ans_bn = retriever.predict(norm)
+            except Exception:
+                pass
+        ans_bn = retriever.predict(query_in_bn.lower().strip())
 
-    # ৩. কিছুই না পেলে ফলব্যাক
+    # ৩. ইন্টারনেটে সার্চ করা
     if not ans_bn:
-        ans_bn = "আমি এই বিষয়ে নিশ্চিত নই। আপনি কি 'Teach' বাটন (🎓) দিয়ে আমাকে এটি শিখিয়ে দেবেন?"
+        web_result = get_web_answer(user_input)
+        if web_result:
+            ans_bn = web_result
+            is_web_search = True
+        else:
+            ans_bn = "আমি এই বিষয়ে ইন্টারনেটে বা আমার ডাটাবেসে কোনো তথ্য খুঁজে পাইনি। আপনি কি 'Teach' বাটন (🎓) দিয়ে আমাকে এটি শিখিয়ে দেবেন?"
 
-    # ৪. উত্তরটি ইউজারের ভাষায় অনুবাদ করে দেওয়া
-    if detected_lang != 'bn':
+    # ৪. উত্তরটি ইউজারের ভাষায় অনুবাদ করা
+    if detected_lang != 'bn' or is_web_search:
         try:
-            final_ans = GoogleTranslator(source='bn', target=target_lang_code).translate(ans_bn)
-            return final_ans
-        except Exception as e:
-            print("Reply translation failed:", e)
-            return ans_bn # ফেইল করলে বাংলায় দেবে
+            src_lang = 'en' if is_web_search else 'bn'
+            final_ans = GoogleTranslator(source=src_lang, target=target_lang_code).translate(ans_bn)
+            return final_ans + (" 🌐" if is_web_search else "")
+        except Exception:
+            return ans_bn + (" 🌐" if is_web_search else "")
 
     return ans_bn
 
@@ -199,7 +186,7 @@ def teach():
                 f.write(fact + "\n")
         threading.Thread(target=_train, daemon=True).start()
         return jsonify({'reply': 'দারুণ! নতুন এই তথ্যটি শিখে নিলাম।'})
-    except Exception as e:
+    except Exception:
         return jsonify({'reply': 'তথ্য সংরক্ষণে সমস্যা হয়েছে।'}), 500
 
 if __name__ == '__main__':
