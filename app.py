@@ -20,10 +20,8 @@ def normalize_text(text):
     return unicodedata.normalize('NFC', text.lower().strip())
 
 def clean_search_query(text):
-    # সার্চ করার আগে "কে", "কি", "who", "is" ইত্যাদি শব্দ বাদ দেওয়া
     text = re.sub(r'\b(কে|কি|কী|who|is|what|the|a|an)\b', '', text, flags=re.IGNORECASE)
-    text = re.sub(r'\s+', ' ', text).strip()
-    return text
+    return re.sub(r'\s+', ' ', text).strip()
 
 def stem_bangla(word):
     suffixes = ['ের', 'টি', 'কে', 'রা', 'দের', 'তে', 'রে', 'টির', 'টিতে', 'টার', 'টাকে', 'য়ের', 'য়']
@@ -46,7 +44,6 @@ class KeywordRetriever:
         with self.lock:
             self.docs = list(dict.fromkeys([l for l in lines if l and l.strip()]))
             self.doc_tokens = [self.tokenize(doc) for doc in self.docs]
-            print(f"✅ Retriever trained on {len(self.docs)} lines")
 
     def predict(self, text):
         with self.lock:
@@ -61,9 +58,7 @@ class KeywordRetriever:
                     if score > best_score:
                         best_score = score
                         best_doc = self.docs[i]
-            
-            if best_score >= 0.25:
-                return best_doc
+            if best_score >= 0.25: return best_doc
             return None
 
 retriever = KeywordRetriever()
@@ -81,96 +76,65 @@ def _train():
     try:
         lines = _load_knowledge()
         if lines: retriever.fit(lines)
-    except Exception as e:
-        print("Train error:", e)
+    except: pass
 
 def safe_translate(text, target_lang):
     if not text.strip(): return text
     try:
         return GoogleTranslator(source='auto', target=target_lang).translate(text)
-    except Exception:
-        try:
-            mm_target = 'en-GB' if target_lang == 'en' else ('bn-IN' if target_lang == 'bn' else target_lang)
-            return MyMemoryTranslator(source='auto', target=mm_target).translate(text)
-        except Exception:
-            return text
+    except:
+        return text
 
 def get_web_answer(query, detected_lang):
     try:
-        headers = {'User-Agent': 'Mozilla/5.0 (AnikAI/1.0)'}
-        
-        # অপ্রয়োজনীয় শব্দ বাদ দেওয়া (যেমন: "বিল গেটস কে" থেকে "কে" বাদ যাবে)
+        headers = {'User-Agent': 'Mozilla/5.0'}
         clean_query = clean_search_query(query)
         
-        # ১. প্রথমে বাংলা উইকিপিডিয়ায় খোঁজা
-        search_url_bn = f"https://bn.wikipedia.org/w/api.php?action=query&list=search&srsearch={requests.utils.quote(clean_query)}&format=json"
-        res_bn = requests.get(search_url_bn, headers=headers, timeout=8)
-        if res_bn.status_code == 200:
-            search_data_bn = res_bn.json()
-            if search_data_bn['query']['search']:
-                top_title = search_data_bn['query']['search'][0]['title']
-                summary_url = f"https://bn.wikipedia.org/api/rest_v1/page/summary/{requests.utils.quote(top_title)}"
-                summary_res = requests.get(summary_url, headers=headers, timeout=5)
-                if summary_res.status_code == 200:
-                    extract = summary_res.json().get('extract')
-                    if extract: return extract
+        # ১. বাংলা প্রশ্ন হলে সরাসরি বাংলা উইকিপিডিয়ায় খোঁজা (অনুবাদ লাগবে না)
+        if detected_lang == 'bn':
+            url = f"https://bn.wikipedia.org/w/api.php?action=query&list=search&srsearch={requests.utils.quote(clean_query)}&format=json"
+            res = requests.get(url, headers=headers, timeout=3)
+            if res.status_code == 200 and res.json()['query']['search']:
+                top_title = res.json()['query']['search'][0]['title']
+                summ = requests.get(f"https://bn.wikipedia.org/api/rest_v1/page/summary/{requests.utils.quote(top_title)}", headers=headers, timeout=3)
+                if summ.status_code == 200: return summ.json().get('extract')
 
-        # ২. বাংলায় না পেলে ইংরেজিতে অনুবাদ করে খোঁজা
-        eng_query = safe_translate(clean_query, 'en')
-        search_url_en = f"https://en.wikipedia.org/w/api.php?action=query&list=search&srsearch={requests.utils.quote(eng_query)}&format=json"
-        res_en = requests.get(search_url_en, headers=headers, timeout=8)
-        if res_en.status_code == 200:
-            search_data_en = res_en.json()
-            if search_data_en['query']['search']:
-                top_title = search_data_en['query']['search'][0]['title']
-                summary_url = f"https://en.wikipedia.org/api/rest_v1/page/summary/{requests.utils.quote(top_title)}"
-                summary_res = requests.get(summary_url, headers=headers, timeout=5)
-                if summary_res.status_code == 200:
-                    return summary_res.json().get('extract')
-
+        # ২. বাংলায় না পেলে বা ইংরেজি প্রশ্ন হলে ইংরেজি উইকিপিডিয়া
+        eng_query = clean_query if detected_lang != 'bn' else safe_translate(clean_query, 'en')
+        url_en = f"https://en.wikipedia.org/w/api.php?action=query&list=search&srsearch={requests.utils.quote(eng_query)}&format=json"
+        res_en = requests.get(url_en, headers=headers, timeout=3)
+        if res_en.status_code == 200 and res_en.json()['query']['search']:
+            top_title = res_en.json()['query']['search'][0]['title']
+            summ_en = requests.get(f"https://en.wikipedia.org/api/rest_v1/page/summary/{requests.utils.quote(top_title)}", headers=headers, timeout=3)
+            if summ_en.status_code == 200:
+                extract = summ_en.json().get('extract')
+                return extract if detected_lang != 'bn' else safe_translate(extract, 'bn')
+                
     except Exception as e:
-        print("Web search error:", e)
+        print("Web error:", e)
     return None
 
 def get_ai_response(user_input, history):
     norm_input = normalize_text(user_input)
-    
-    if re.search(r'[\u0980-\u09FF]', norm_input):
-        detected_lang = 'bn'
-    else:
-        try: detected_lang = detect(norm_input)
-        except: detected_lang = 'en'
-
+    detected_lang = 'bn' if re.search(r'[\u0980-\u09FF]', norm_input) else 'en'
     target_lang_code = 'zh-CN' if detected_lang.startswith('zh') else detected_lang
     ans_bn = None
     is_web_search = False
 
-    # ১. লোকাল হার্ডকোড
-    if "জনি কে" in norm_input or "জনি কি" in norm_input:
-        ans_bn = "জনি হলো অনিকের স্ত্রী। তাদের বিয়ে হয়েছে ২৮ নভেম্বর ২০২৫ সালে। জনির বাড়ি পাইকশা।"
-    elif "অনিক কে" in norm_input or "অনিক কি" in norm_input:
-        ans_bn = "অনিকের সম্পূর্ণ নাম মেহেদী হাসান অনিক। তিনিই আমাকে তৈরি করেছেন।"
-    elif "কে তৈরি" in norm_input or "who created" in norm_input:
-        ans_bn = "আমাকে তৈরি করেছেন মেহেদী হাসান অনিক।"
-    elif "বিয়ে" in norm_input:
-        ans_bn = "অনিক এবং জনির বিয়ে হয়েছে ২৮ নভেম্বর ২০২৫ সালে।"
-    elif "অলক" in norm_input:
-        ans_bn = "অলক হচ্ছে অনিকের ছোট ভাই। সে অত্যন্ত বুদ্ধিমান এবং পড়াশোনায় অতুলনীয়।"
+    if "বিল গেটস" in norm_input or "bill gates" in norm_input:
+        ans_bn = "বিল গেটস মাইক্রোসফটের সহ-প্রতিষ্ঠাতা এবং বিশ্বের অন্যতম ধনী ব্যক্তি।"
     elif "রাজধানী" in norm_input or "capital" in norm_input:
         if "বাংলাদেশ" in norm_input or "bangladesh" in norm_input: ans_bn = "বাংলাদেশের রাজধানী ঢাকা।"
         elif "ইরান" in norm_input or "iran" in norm_input: ans_bn = "ইরানের রাজধানী তেহরান।"
-        elif "ভারত" in norm_input or "india" in norm_input: ans_bn = "ভারতের রাজধানী নতুন দিল্লি।"
     elif "বড় দেশ" in norm_input or "largest country" in norm_input:
         ans_bn = "বিশ্বের সবচেয়ে বড় দেশ রাশিয়া।"
-    elif "ছোট দেশ" in norm_input or "smallest country" in norm_input:
-        ans_bn = "বিশ্বের সবচেয়ে ছোট দেশ ভ্যাটিকান সিটি।"
+    elif "অলক" in norm_input:
+        ans_bn = "অলক হচ্ছে অনিকের ছোট ভাই। সে অত্যন্ত বুদ্ধিমান এবং পড়াশোনায় অতুলনীয়।"
 
-    # ২. ডাটাবেসে খোঁজা
     if not ans_bn:
         query_in_bn = user_input if detected_lang == 'bn' else safe_translate(user_input, 'bn')
         ans_bn = retriever.predict(query_in_bn)
 
-    # ৩. ইন্টারনেটে সার্চ করা
     if not ans_bn:
         web_result = get_web_answer(user_input, detected_lang)
         if web_result:
@@ -179,15 +143,10 @@ def get_ai_response(user_input, history):
         else:
             ans_bn = "আমি এই বিষয়ে ইন্টারনেটে বা আমার ডাটাবেসে কোনো তথ্য খুঁজে পাইনি। আপনি কি 'Teach' বাটন (🎓) দিয়ে আমাকে এটি শিখিয়ে দেবেন?"
 
-    # ৪. উত্তরটি ইউজারের ভাষায় অনুবাদ করা
-    if detected_lang != 'bn' or is_web_search:
-        try:
-            final_ans = safe_translate(ans_bn, target_lang_code)
-            return final_ans + (" 🌐" if is_web_search else "")
-        except Exception:
-            return ans_bn + (" 🌐" if is_web_search else "")
+    if detected_lang != 'bn' and not is_web_search:
+        ans_bn = safe_translate(ans_bn, target_lang_code)
 
-    return ans_bn
+    return ans_bn + (" 🌐" if is_web_search else "")
 
 @app.route('/')
 def index(): return send_from_directory(BASE_DIR, 'index.html')
@@ -198,7 +157,7 @@ def ask():
         data = request.get_json(silent=True) or {}
         reply = get_ai_response(data.get('message', ''), data.get('history', []))
         return jsonify({'reply': reply})
-    except Exception as e:
+    except:
         return jsonify({'reply': 'দুঃখিত, একটি সমস্যা হয়েছে।'}), 500
 
 @app.route('/teach', methods=['POST'])
@@ -218,7 +177,7 @@ def teach():
                 f.write(fact + "\n")
         threading.Thread(target=_train, daemon=True).start()
         return jsonify({'reply': 'দারুণ! নতুন এই তথ্যটি শিখে নিলাম।'})
-    except Exception:
+    except:
         return jsonify({'reply': 'তথ্য সংরক্ষণে সমস্যা হয়েছে।'}), 500
 
 if __name__ == '__main__':
