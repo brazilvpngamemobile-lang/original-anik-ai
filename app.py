@@ -17,7 +17,10 @@ STOPWORDS = {
 }
 
 def normalize_text(text):
-    return unicodedata.normalize('NFC', text.lower().strip())
+    # "ড়" এবং "ড়" এর ইউনিকোড সমস্যা দূর করা
+    text = unicodedata.normalize('NFC', text.lower().strip())
+    text = text.replace('ড়', 'ড়').replace('ঢ়', 'ঢ়').replace('য়', 'য়')
+    return text
 
 def clean_search_query(text):
     text = re.sub(r'\b(কে|কি|কী|who|is|what|the|a|an)\b', '', text, flags=re.IGNORECASE)
@@ -83,33 +86,35 @@ def safe_translate(text, target_lang):
     try:
         return GoogleTranslator(source='auto', target=target_lang).translate(text)
     except:
-        return text
+        try:
+            mm_target = 'en-GB' if target_lang == 'en' else ('bn-IN' if target_lang == 'bn' else target_lang)
+            return MyMemoryTranslator(source='auto', target=mm_target).translate(text)
+        except: return text
 
-def get_web_answer(query, detected_lang):
+def get_web_answer(query):
     try:
         headers = {'User-Agent': 'Mozilla/5.0'}
-        clean_query = clean_search_query(query)
+        eng_query = safe_translate(query, 'en')
         
-        # ১. বাংলা প্রশ্ন হলে সরাসরি বাংলা উইকিপিডিয়ায় খোঁজা (অনুবাদ লাগবে না)
-        if detected_lang == 'bn':
-            url = f"https://bn.wikipedia.org/w/api.php?action=query&list=search&srsearch={requests.utils.quote(clean_query)}&format=json"
-            res = requests.get(url, headers=headers, timeout=3)
-            if res.status_code == 200 and res.json()['query']['search']:
-                top_title = res.json()['query']['search'][0]['title']
-                summ = requests.get(f"https://bn.wikipedia.org/api/rest_v1/page/summary/{requests.utils.quote(top_title)}", headers=headers, timeout=3)
-                if summ.status_code == 200: return summ.json().get('extract')
-
-        # ২. বাংলায় না পেলে বা ইংরেজি প্রশ্ন হলে ইংরেজি উইকিপিডিয়া
-        eng_query = clean_query if detected_lang != 'bn' else safe_translate(clean_query, 'en')
-        url_en = f"https://en.wikipedia.org/w/api.php?action=query&list=search&srsearch={requests.utils.quote(eng_query)}&format=json"
-        res_en = requests.get(url_en, headers=headers, timeout=3)
-        if res_en.status_code == 200 and res_en.json()['query']['search']:
-            top_title = res_en.json()['query']['search'][0]['title']
-            summ_en = requests.get(f"https://en.wikipedia.org/api/rest_v1/page/summary/{requests.utils.quote(top_title)}", headers=headers, timeout=3)
-            if summ_en.status_code == 200:
-                extract = summ_en.json().get('extract')
-                return extract if detected_lang != 'bn' else safe_translate(extract, 'bn')
-                
+        # DuckDuckGo Instant Answer API (প্রশ্নের ডাইরেক্ট উত্তর দেয়)
+        url = f"https://api.duckduckgo.com/?q={requests.utils.quote(eng_query)}&format=json&no_html=1"
+        res = requests.get(url, headers=headers, timeout=5)
+        
+        if res.status_code == 200:
+            data = res.json()
+            if data.get('AbstractText'): return data['AbstractText']
+            if data.get('Answer'): return data['Answer']
+            
+        # DuckDuckGo ফেইল করলে Wikipedia fallback
+        clean_query = clean_search_query(eng_query)
+        wiki_url = f"https://en.wikipedia.org/w/api.php?action=query&list=search&srsearch={requests.utils.quote(clean_query)}&format=json"
+        wiki_res = requests.get(wiki_url, headers=headers, timeout=3)
+        if wiki_res.status_code == 200 and wiki_res.json()['query']['search']:
+            top_title = wiki_res.json()['query']['search'][0]['title']
+            summary_url = f"https://en.wikipedia.org/api/rest_v1/page/summary/{requests.utils.quote(top_title)}"
+            summary_res = requests.get(summary_url, headers=headers, timeout=3)
+            if summary_res.status_code == 200:
+                return summary_res.json().get('extract')
     except Exception as e:
         print("Web error:", e)
     return None
@@ -121,28 +126,65 @@ def get_ai_response(user_input, history):
     ans_bn = None
     is_web_search = False
 
-    if "বিল গেটস" in norm_input or "bill gates" in norm_input:
-        ans_bn = "বিল গেটস মাইক্রোসফটের সহ-প্রতিষ্ঠাতা এবং বিশ্বের অন্যতম ধনী ব্যক্তি।"
+    # ==========================================
+    # ১. লোকাল হার্ডকোড (সাধারণ প্রশ্নের নিশ্চিত উত্তর)
+    # ==========================================
+    
+    # দেশ ও ভূগোল
+    if "বড় দেশ" in norm_input or "বৃহত্তম দেশ" in norm_input or "largest country" in norm_input:
+        ans_bn = "বিশ্বের সবচেয়ে বড় দেশ রাশিয়া।"
+    elif "ছোট দেশ" in norm_input or "smallest country" in norm_input:
+        ans_bn = "বিশ্বের সবচেয়ে ছোট দেশ ভ্যাটিকান সিটি।"
+    elif "পিরামিডের দেশ" in norm_input or "land of pyramids" in norm_input:
+        ans_bn = "মিশরকে পিরামিডের দেশ বলা হয়।"
+    elif "দীর্ঘতম নদী" in norm_input or "longest river" in norm_input:
+        ans_bn = "বিশ্বের সবচেয়ে দীর্ঘতম নদী নীলনদ।"
+    elif "বড় মহাসাগর" in norm_input or "largest ocean" in norm_input:
+        ans_bn = "বিশ্বের সবচেয়ে বড় মহাসাগর প্রশান্ত মহাসাগর।"
+    
+    # রাজধানী
     elif "রাজধানী" in norm_input or "capital" in norm_input:
         if "বাংলাদেশ" in norm_input or "bangladesh" in norm_input: ans_bn = "বাংলাদেশের রাজধানী ঢাকা।"
+        elif "ভারত" in norm_input or "india" in norm_input: ans_bn = "ভারতের রাজধানী নতুন দিল্লি।"
         elif "ইরান" in norm_input or "iran" in norm_input: ans_bn = "ইরানের রাজধানী তেহরান।"
-    elif "বড় দেশ" in norm_input or "largest country" in norm_input:
-        ans_bn = "বিশ্বের সবচেয়ে বড় দেশ রাশিয়া।"
+        elif "আমেরিকা" in norm_input or "usa" in norm_input or "america" in norm_input: ans_bn = "আমেরিকার রাজধানী ওয়াশিংটন ডিসি।"
+        elif "জাপান" in norm_input or "japan" in norm_input: ans_bn = "জাপানের রাজধানী টোকিও।"
+        
+    # পরিচিত ব্যক্তি
+    elif "বিল গেটস" in norm_input or "bill gates" in norm_input:
+        ans_bn = "বিল গেটস মাইক্রোসফটের সহ-প্রতিষ্ঠাতা এবং বিশ্বের অন্যতম ধনী ব্যক্তি।"
+    elif "স্টিভ জবস" in norm_input or "steve jobs" in norm_input:
+        ans_bn = "স্টিভ জবস অ্যাপল ইনকরপোরেটেডের সহ-প্রতিষ্ঠাতা ছিলেন।"
+    elif "মার্ক জাকারবার্গ" in norm_input or "mark zuckerberg" in norm_input:
+        ans_bn = "মার্ক জাকারবার্গ ফেসবুকের প্রতিষ্ঠাতা এবং সিইও।"
+        
+    # পরিচিতি
+    elif "কে তৈরি" in norm_input or "who created" in norm_input or "who made" in norm_input:
+        ans_bn = "আমাকে তৈরি করেছেন মেহেদী হাসান অনিক।"
     elif "অলক" in norm_input:
         ans_bn = "অলক হচ্ছে অনিকের ছোট ভাই। সে অত্যন্ত বুদ্ধিমান এবং পড়াশোনায় অতুলনীয়।"
 
+    # ==========================================
+    # ২. ডাটাবেসে খোঁজা
+    # ==========================================
     if not ans_bn:
         query_in_bn = user_input if detected_lang == 'bn' else safe_translate(user_input, 'bn')
         ans_bn = retriever.predict(query_in_bn)
 
+    # ==========================================
+    # ৩. ইন্টারনেটে সার্চ করা (যদি ডাটাবেসেও না পায়)
+    # ==========================================
     if not ans_bn:
-        web_result = get_web_answer(user_input, detected_lang)
+        web_result = get_web_answer(user_input)
         if web_result:
             ans_bn = web_result
             is_web_search = True
         else:
             ans_bn = "আমি এই বিষয়ে ইন্টারনেটে বা আমার ডাটাবেসে কোনো তথ্য খুঁজে পাইনি। আপনি কি 'Teach' বাটন (🎓) দিয়ে আমাকে এটি শিখিয়ে দেবেন?"
 
+    # ==========================================
+    # ৪. উত্তরটি ইউজারের ভাষায় অনুবাদ করা
+    # ==========================================
     if detected_lang != 'bn' and not is_web_search:
         ans_bn = safe_translate(ans_bn, target_lang_code)
 
@@ -157,7 +199,7 @@ def ask():
         data = request.get_json(silent=True) or {}
         reply = get_ai_response(data.get('message', ''), data.get('history', []))
         return jsonify({'reply': reply})
-    except:
+    except Exception as e:
         return jsonify({'reply': 'দুঃখিত, একটি সমস্যা হয়েছে।'}), 500
 
 @app.route('/teach', methods=['POST'])
